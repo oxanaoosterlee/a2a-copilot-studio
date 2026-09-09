@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+.vs/
+TestResults/
+artifacts/
+.env
+.env.*
+*.user
+*.suo
+**/appsettings.Local.json
+**/http-client.private.env.json
+infra/*.local.bicepparam

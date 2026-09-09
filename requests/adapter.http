@@ -1,0 +1,56 @@
+# VS Code REST Client syntax. The client extension is optional; any HTTP client can send these requests.
+# ADAPTER_ACCESS_TOKEN must be a USER access token for the adapter API, never an ID token or a Power Platform token.
+# Keep it in your local environment, not in this file. REST Client may need an editor restart to see new environment variables.
+@baseUrl = http://localhost:5180
+@agent = support
+
+### Health (local readiness only, no downstream message)
+GET {{baseUrl}}/health
+
+### Configured agents, without their secret connection URLs
+GET {{baseUrl}}/agents
+Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
+
+### Discover this agent
+GET {{baseUrl}}/a2a/{{agent}}/.well-known/agent-card.json
+
+### End-to-end connection test: adapter -> delegated OBO -> Copilot Studio -> A2A text reply
+# @name firstTurn
+POST {{baseUrl}}/a2a/{{agent}}
+Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
+Content-Type: application/json
+A2A-Version: 1.0
+
+{
+  "jsonrpc": "2.0",
+  "id": "{{$guid}}",
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "messageId": "{{$guid}}",
+      "role": "ROLE_USER",
+      "parts": [{ "text": "Reply with a short greeting.", "mediaType": "text/plain" }]
+    },
+    "configuration": { "acceptedOutputModes": ["text/plain"], "returnImmediately": false }
+  }
+}
+
+### Continue the context returned by firstTurn (send firstTurn successfully first)
+POST {{baseUrl}}/a2a/{{agent}}
+Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
+Content-Type: application/json
+A2A-Version: 1.0
+
+{
+  "jsonrpc": "2.0",
+  "id": "{{$guid}}",
+  "method": "SendMessage",
+  "params": {
+    "message": {
+      "messageId": "{{$guid}}",
+      "contextId": "{{firstTurn.response.body.$.result.message.contextId}}",
+      "role": "ROLE_USER",
+      "parts": [{ "text": "What was my previous message?" }]
+    }
+  }
+}

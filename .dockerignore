@@ -1,0 +1,12 @@
+**/bin
+**/obj
+.git
+.vs
+.env*
+**/appsettings.Local.json
+**/http-client.private.env.json
+example
+infra
+src/CopilotStudioA2A.Tests
+artifacts
+TestResults
