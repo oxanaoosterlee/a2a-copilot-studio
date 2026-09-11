@@ -19,6 +19,24 @@ internal interface ICopilotStudioBackend
 internal sealed record CopilotReply(string Text, string ConversationId);
 
 /// <summary>
+/// Returns a fixed response without acquiring a token or contacting Copilot Studio.
+/// </summary>
+internal sealed class HardcodedBackend : ICopilotStudioBackend
+{
+    internal const string ResponseText = "This is a hardcoded response.";
+
+    /// <inheritdoc/>
+    public Task<CopilotReply> SendAsync(string agentName, string text, string userAssertion,
+        string? conversationId, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(new CopilotReply(
+            ResponseText,
+            conversationId ?? $"hardcoded-{agentName}-{Guid.NewGuid():N}"));
+    }
+}
+
+/// <summary>
 /// Sends user messages to Copilot Studio and returns the final text answer.
 /// </summary>
 internal sealed class CopilotStudioBackend(

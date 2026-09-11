@@ -25,7 +25,7 @@ param agentNames = [
 // App Service receives one Agents setting: ["CoolAgent"].
 // Runtime also supports a root Agents JSON array in appsettings and, alternatively,
 // indexed environment settings such as Agents__0; this template emits neither.
-// Each listed name becomes the runtime route /a2a/{name}.
+// Each listed name becomes the runtime route /copilot-studio/{name}/a2a.
 
 // Supply secrets through the deployment process environment, never source control.
 // No fallback: missing variables must fail rather than deploy dummy credentials.

@@ -10,21 +10,28 @@ using OpenTelemetry.Trace;
 var builder = WebApplication.CreateBuilder(args);
 var adapter = builder.Configuration.GetSection("Adapter").Get<AdapterOptions>() ?? new();
 var authentication = builder.Configuration.GetSection("Authentication").Get<AuthenticationOptions>() ?? new();
-var copilot = CopilotStudioOptions.Load(builder.Configuration);
+var copilot = CopilotStudioOptions.Load(builder.Configuration, requireDirectConnectUrl: !adapter.UseHardcodedBackend);
 adapter.Validate(builder.Environment.IsDevelopment());
-authentication.Validate();
+authentication.Validate(requireClientSecret: !adapter.UseHardcodedBackend);
 
 builder.Services.AddSingleton(adapter);
 builder.Services.AddSingleton(authentication);
 builder.Services.AddSingleton(copilot);
 builder.Services.AddSingleton<ConversationStore>();
-builder.Services.AddSingleton<IDelegatedTokenProvider, DelegatedTokenProvider>();
-builder.Services.AddSingleton<ICopilotStudioBackend, CopilotStudioBackend>();
 builder.Services.AddDelegatedAuthentication(authentication);
-builder.Services.AddHttpClient(CopilotStudioBackend.HttpClientName, client =>
-    client.Timeout = TimeSpan.FromSeconds(adapter.RequestTimeoutSeconds))
-    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false })
-    .RemoveAllLoggers(); // URLs and SDK payloads are secret; use sanitized invocation telemetry.
+if (adapter.UseHardcodedBackend)
+{
+    builder.Services.AddSingleton<ICopilotStudioBackend, HardcodedBackend>();
+}
+else
+{
+    builder.Services.AddSingleton<IDelegatedTokenProvider, DelegatedTokenProvider>();
+    builder.Services.AddSingleton<ICopilotStudioBackend, CopilotStudioBackend>();
+    builder.Services.AddHttpClient(CopilotStudioBackend.HttpClientName, client =>
+        client.Timeout = TimeSpan.FromSeconds(adapter.RequestTimeoutSeconds))
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false })
+        .RemoveAllLoggers(); // URLs and SDK payloads are secret; use sanitized invocation telemetry.
+}
 
 // No global retry handler: a retried message can execute an agent action twice.
 var telemetry = builder.Services.AddOpenTelemetry()
@@ -54,6 +61,8 @@ foreach (var name in copilot.Agents.Keys)
 
 var app = builder.Build();
 copilot.LogUnlistedAgentWarnings(app.Logger);
+if (adapter.UseHardcodedBackend)
+    app.Logger.LogWarning("The hardcoded backend is enabled. Copilot Studio will not be contacted.");
 app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
@@ -81,9 +90,9 @@ if (copilot.Agents.Count == 1)
 }
 
 // Unknown agent calls still authenticate and return a structured JSON-RPC error with HTTP 404.
-app.MapPost("/a2a/{agentName}", () => Results.NotFound())
+app.MapPost("/copilot-studio/{agentName}/a2a", () => Results.NotFound())
     .WithMetadata(new A2ARoute(null)).RequireAuthorization(DelegatedAuthentication.Policy);
-app.MapGet("/a2a/{agentName}/.well-known/agent-card.json", () => Results.NotFound()).AllowAnonymous();
+app.MapGet("/copilot-studio/{agentName}/a2a/.well-known/agent-card.json", () => Results.NotFound()).AllowAnonymous();
 app.Run();
 
 /// <summary>

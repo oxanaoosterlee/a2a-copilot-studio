@@ -60,14 +60,14 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
         var token = Factory.CreateToken();
         using var supportResponse = await AdapterWebApplicationFactory.SendAsync(Client, token);
         var support = await TestRequests.AssertMessageAsync(supportResponse, "support: Hello");
-        using var billingResponse = await AdapterWebApplicationFactory.SendAsync(Client, token, path: "/a2a/billing");
+        using var billingResponse = await AdapterWebApplicationFactory.SendAsync(Client, token, path: "/copilot-studio/billing/a2a");
         var billing = await TestRequests.AssertMessageAsync(billingResponse, "billing: Hello");
         var supportContext = support.GetProperty("contextId").GetString()!;
         var billingContext = billing.GetProperty("contextId").GetString()!;
         Assert.NotEqual(supportContext, billingContext);
 
         using var billingNext = await AdapterWebApplicationFactory.SendAsync(Client, token,
-            TestRequests.Create("invoice", billingContext).ToJsonString(), "/a2a/billing");
+            TestRequests.Create("invoice", billingContext).ToJsonString(), "/copilot-studio/billing/a2a");
         var billingMessage = await TestRequests.AssertMessageAsync(billingNext, "billing: invoice");
         using var supportNext = await AdapterWebApplicationFactory.SendAsync(Client, token,
             TestRequests.Create("ticket", supportContext).ToJsonString());
@@ -108,7 +108,7 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
     [Fact]
     public async Task GivenUnknownAgent_WhenSendingMessage_Returns404ProtocolError()
     {
-        using var response = await AdapterWebApplicationFactory.SendAsync(Client, Factory.CreateToken(), path: "/a2a/unknown");
+        using var response = await AdapterWebApplicationFactory.SendAsync(Client, Factory.CreateToken(), path: "/copilot-studio/unknown/a2a");
 
         var body = await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidParams, HttpStatusCode.NotFound);
         Assert.Equal("Unknown agent.", body.GetProperty("error").GetProperty("message").GetString());
@@ -137,7 +137,7 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
         var first = await TestRequests.AssertMessageAsync(firstResponse, "support: Hello");
 
         using var response = await AdapterWebApplicationFactory.SendAsync(Client, token,
-            TestRequests.Create(contextId: first.GetProperty("contextId").GetString()).ToJsonString(), "/a2a/billing");
+            TestRequests.Create(contextId: first.GetProperty("contextId").GetString()).ToJsonString(), "/copilot-studio/billing/a2a");
 
         await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidParams);
         Assert.Single(Factory.Backend.Calls);
@@ -183,7 +183,7 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
     [InlineData("DELETE")]
     public async Task GivenWrongHttpMethod_WhenCallingRuntime_ReturnsMethodNotAllowed(string method)
     {
-        using var request = new HttpRequestMessage(new HttpMethod(method), "/a2a/support");
+        using var request = new HttpRequestMessage(new HttpMethod(method), "/copilot-studio/support/a2a");
         request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", Factory.CreateToken());
         request.Headers.Add("A2A-Version", "1.0");
 
@@ -327,7 +327,7 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
             overlap = AdapterWebApplicationFactory.SendAsync(client, token,
                 TestRequests.Create("overlapping turn", contextId).ToJsonString());
             Assert.False(overlap.IsCompleted);
-            using var newContext = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/a2a/billing");
+            using var newContext = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/copilot-studio/billing/a2a");
             await TestRequests.AssertErrorAsync(newContext, A2AErrorCode.InternalError);
             Assert.Equal(2, factory.Backend.Calls.Count);
         }

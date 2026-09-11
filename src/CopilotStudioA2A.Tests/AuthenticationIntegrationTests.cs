@@ -19,9 +19,9 @@ public sealed class AuthenticationIntegrationTests : AdapterIntegrationTestsBase
     /// <returns>The asynchronous test operation.</returns>
     [Theory]
     [InlineData("GET", "/agents")]
-    [InlineData("POST", "/a2a/support")]
-    [InlineData("POST", "/a2a/billing")]
-    [InlineData("POST", "/a2a/unknown")]
+    [InlineData("POST", "/copilot-studio/support/a2a")]
+    [InlineData("POST", "/copilot-studio/billing/a2a")]
+    [InlineData("POST", "/copilot-studio/unknown/a2a")]
     public async Task GivenNoToken_WhenCallingProtectedRoute_ReturnsUnauthorized(string method, string path)
     {
         using var request = new HttpRequestMessage(new HttpMethod(method), path);
@@ -62,7 +62,7 @@ public sealed class AuthenticationIntegrationTests : AdapterIntegrationTestsBase
             _ => throw new ArgumentOutOfRangeException(nameof(failure))
         };
 
-        foreach (var path in new[] { "/agents", "/a2a/support", "/a2a/billing" })
+        foreach (var path in new[] { "/agents", "/copilot-studio/support/a2a", "/copilot-studio/billing/a2a" })
         {
             using var request = new HttpRequestMessage(path == "/agents" ? HttpMethod.Get : HttpMethod.Post, path);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -97,7 +97,7 @@ public sealed class AuthenticationIntegrationTests : AdapterIntegrationTestsBase
     public async Task GivenInvalidDelegation_WhenCallingKnownRoutes_ReturnsForbidden(string type, string? value)
     {
         var token = Factory.CreateToken(TestIdentity.WithClaim(type, value));
-        foreach (var path in new[] { "/agents", "/a2a/support", "/a2a/billing" })
+        foreach (var path in new[] { "/agents", "/copilot-studio/support/a2a", "/copilot-studio/billing/a2a" })
         {
             using var request = new HttpRequestMessage(path == "/agents" ? HttpMethod.Get : HttpMethod.Post, path);
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -142,8 +142,8 @@ public sealed class AuthenticationIntegrationTests : AdapterIntegrationTestsBase
         foreach (var agent in body.EnumerateArray())
         {
             var name = agent.GetProperty("name").GetString();
-            Assert.Equal($"https://localhost/a2a/{name}", agent.GetProperty("endpoint").GetString());
-            Assert.Equal($"https://localhost/a2a/{name}/.well-known/agent-card.json", agent.GetProperty("agentCard").GetString());
+            Assert.Equal($"https://localhost/copilot-studio/{name}/a2a", agent.GetProperty("endpoint").GetString());
+            Assert.Equal($"https://localhost/copilot-studio/{name}/a2a/.well-known/agent-card.json", agent.GetProperty("agentCard").GetString());
         }
         Assert.Empty(Factory.Backend.Calls);
     }

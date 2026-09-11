@@ -10,6 +10,7 @@ namespace CopilotStudioA2A;
 internal sealed class AdapterOptions
 {
     public string PublicBaseUrl { get; set; } = "http://localhost:5180";
+    public bool UseHardcodedBackend { get; set; }
     public int MaxConversations { get; set; } = 1000;
     public int MaxRequestBytes { get; set; } = 65536;
     public int RequestTimeoutSeconds { get; set; } = 120;
@@ -44,13 +45,15 @@ internal sealed class AuthenticationOptions
     public string ClientSecret { get; set; } = "";
     public string Authority => $"https://login.microsoftonline.com/{TenantId}/v2.0";
 
-    public void Validate()
+    public void Validate(bool requireClientSecret = true)
     {
         if (!Guid.TryParse(TenantId, out _) || !Guid.TryParse(ClientId, out _) ||
-            Audience != ClientId || RequiredScope != "Agents.Invoke" || string.IsNullOrWhiteSpace(ClientSecret))
+            Audience != ClientId || RequiredScope != "Agents.Invoke" ||
+            (requireClientSecret && string.IsNullOrWhiteSpace(ClientSecret)))
         {
             throw new InvalidOperationException(
-                "Configure Authentication:TenantId, ClientId, Audience (the same client ID), ClientSecret and RequiredScope=Agents.Invoke. Only tenant-specific Entra v2 delegated access tokens are accepted.");
+                $"Configure Authentication:TenantId, ClientId, Audience (the same client ID), " +
+                $"{(requireClientSecret ? "ClientSecret and " : "")}RequiredScope=Agents.Invoke. Only tenant-specific Entra v2 delegated access tokens are accepted.");
         }
     }
 }
@@ -68,7 +71,7 @@ internal sealed class CopilotStudioOptions
     public Dictionary<string, CopilotAgentOptions> Agents { get; } = new(StringComparer.OrdinalIgnoreCase);
     public IReadOnlyList<string> UnlistedAgents { get; private set; } = [];
 
-    public static CopilotStudioOptions Load(IConfiguration configuration)
+    public static CopilotStudioOptions Load(IConfiguration configuration, bool requireDirectConnectUrl = true)
     {
         var names = ReadAgentNames(configuration.GetSection("Agents"));
         var listedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -93,7 +96,7 @@ internal sealed class CopilotStudioOptions
                 DirectConnectUrl = configuration[$"{name}:DirectConnectUrl"] ?? "",
                 SkillDescription = configuration[$"{name}:SkillDescription"] ?? ""
             };
-            ValidateAgent(name, agent);
+            ValidateAgent(name, agent, requireDirectConnectUrl);
             options.Agents.Add(name, agent);
         }
 
@@ -148,17 +151,17 @@ internal sealed class CopilotStudioOptions
         return names;
     }
 
-    private static void ValidateAgent(string name, CopilotAgentOptions agent)
+    private static void ValidateAgent(string name, CopilotAgentOptions agent, bool requireDirectConnectUrl)
     {
         var missing = new List<string>();
-        if (string.IsNullOrWhiteSpace(agent.DirectConnectUrl)) missing.Add($"{name}:DirectConnectUrl");
+        if (requireDirectConnectUrl && string.IsNullOrWhiteSpace(agent.DirectConnectUrl)) missing.Add($"{name}:DirectConnectUrl");
         if (string.IsNullOrWhiteSpace(agent.SkillDescription)) missing.Add($"{name}:SkillDescription");
         if (missing.Count > 0)
             throw new InvalidOperationException($"Agent '{name}' is listed in Agents but required settings are missing or blank: {string.Join(", ", missing)}.");
 
-        if (!Uri.TryCreate(agent.DirectConnectUrl, UriKind.Absolute, out var url) ||
+        if (requireDirectConnectUrl && (!Uri.TryCreate(agent.DirectConnectUrl, UriKind.Absolute, out var url) ||
             url.Scheme != "https" || !string.IsNullOrEmpty(url.UserInfo) ||
-            !string.IsNullOrEmpty(url.Fragment) || !url.Host.EndsWith(".environment.api.powerplatform.com", StringComparison.OrdinalIgnoreCase))
+            !string.IsNullOrEmpty(url.Fragment) || !url.Host.EndsWith(".environment.api.powerplatform.com", StringComparison.OrdinalIgnoreCase)))
         {
             // Never include the configured value in errors: connection URLs are secret.
             throw new InvalidOperationException($"{name}:DirectConnectUrl must be an HTTPS public-cloud Power Platform URL.");

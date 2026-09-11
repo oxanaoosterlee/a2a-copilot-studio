@@ -14,14 +14,14 @@ public sealed class AgentDiscoveryIntegrationTests : AdapterIntegrationTestsBase
     [InlineData("billing", "Explains invoices, payment status and billing charges.")]
     public async Task GivenConfiguredAgent_WhenGettingAnonymousCard_ReturnsTextOnlyV1Capabilities(string name, string skillDescription)
     {
-        using var response = await Client.GetAsync($"/a2a/{name}/.well-known/agent-card.json");
+        using var response = await Client.GetAsync($"/copilot-studio/{name}/a2a/.well-known/agent-card.json");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         var card = await TestRequests.ReadResponseAsync(response);
         Assert.Equal(name, card.GetProperty("name").GetString());
         Assert.Equal("1.0.0", card.GetProperty("version").GetString());
         var endpoint = Assert.Single(card.GetProperty("supportedInterfaces").EnumerateArray());
-        Assert.Equal($"https://localhost/a2a/{name}", endpoint.GetProperty("url").GetString());
+        Assert.Equal($"https://localhost/copilot-studio/{name}/a2a", endpoint.GetProperty("url").GetString());
         Assert.Equal("JSONRPC", endpoint.GetProperty("protocolBinding").GetString());
         Assert.Equal("1.0", endpoint.GetProperty("protocolVersion").GetString());
         var capabilities = card.GetProperty("capabilities");
@@ -64,7 +64,7 @@ public sealed class AgentDiscoveryIntegrationTests : AdapterIntegrationTestsBase
         using var client = factory.CreateLocalClient();
 
         using var rootResponse = await client.GetAsync("/.well-known/agent-card.json");
-        using var agentResponse = await client.GetAsync("/a2a/support/.well-known/agent-card.json");
+        using var agentResponse = await client.GetAsync("/copilot-studio/support/a2a/.well-known/agent-card.json");
 
         Assert.Equal(HttpStatusCode.OK, rootResponse.StatusCode);
         Assert.Equal(HttpStatusCode.OK, agentResponse.StatusCode);
@@ -82,7 +82,7 @@ public sealed class AgentDiscoveryIntegrationTests : AdapterIntegrationTestsBase
     [Fact]
     public async Task GivenUnknownAgent_WhenGettingCard_ReturnsNotFound()
     {
-        using var response = await Client.GetAsync("/a2a/unknown/.well-known/agent-card.json");
+        using var response = await Client.GetAsync("/copilot-studio/unknown/a2a/.well-known/agent-card.json");
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         Assert.Empty(Factory.Backend.Calls);

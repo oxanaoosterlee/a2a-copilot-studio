@@ -35,6 +35,7 @@ public sealed class AdapterWebApplicationFactory : WebApplicationFactory<Program
 {
     private readonly HttpClient _backchannel = new(new DenyNetworkHandler());
     private readonly DirectoryInfo _contentRoot;
+    private readonly bool _replaceBackend;
     private readonly Dictionary<string, string?> _settings;
     private readonly RsaSecurityKey _signingKey;
 
@@ -42,8 +43,9 @@ public sealed class AdapterWebApplicationFactory : WebApplicationFactory<Program
     public AdapterWebApplicationFactory() : this(includeBilling: true) { }
 
     internal AdapterWebApplicationFactory(bool includeBilling, int maxRequestBytes = 65536, int maxConversations = 16,
-        Action<IDictionary<string, string?>>? configureSettings = null)
+        Action<IDictionary<string, string?>>? configureSettings = null, bool replaceBackend = true)
     {
+        _replaceBackend = replaceBackend;
         using var rsa = RSA.Create(2048);
         _signingKey = new RsaSecurityKey(rsa.ExportParameters(true)) { KeyId = Guid.NewGuid().ToString("N") };
         _settings = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
@@ -119,7 +121,7 @@ public sealed class AdapterWebApplicationFactory : WebApplicationFactory<Program
     });
 
     internal static async Task<HttpResponseMessage> SendAsync(HttpClient client, string? token,
-        string? json = null, string path = "/a2a/support", string? version = "1.0", string? contentType = "application/json")
+        string? json = null, string path = "/copilot-studio/support/a2a", string? version = "1.0", string? contentType = "application/json")
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
@@ -163,8 +165,11 @@ public sealed class AdapterWebApplicationFactory : WebApplicationFactory<Program
                 logging.AddProvider(Logs);
                 logging.AddFilter<RecordingLoggerProvider>((_, level) => level >= LogLevel.Warning);
             });
-            services.RemoveAll<ICopilotStudioBackend>();
-            services.AddSingleton<ICopilotStudioBackend>(Backend);
+            if (_replaceBackend)
+            {
+                services.RemoveAll<ICopilotStudioBackend>();
+                services.AddSingleton<ICopilotStudioBackend>(Backend);
+            }
             services.RemoveAll<IDelegatedTokenProvider>();
             services.AddSingleton<IDelegatedTokenProvider>(_ =>
                 throw new InvalidOperationException("Live OBO authentication is forbidden in these tests."));

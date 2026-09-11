@@ -29,7 +29,7 @@ participant Entra as Microsoft Entra ID
 participant Backend as CopilotStudioBackend
 participant Studio as Copilot Studio specialist agent
 
-Caller->>Adapter: POST /a2a/{name}<br/>Bearer adapter access token
+Caller->>Adapter: POST /copilot-studio/{name}/a2a<br/>Bearer adapter access token
 Adapter->>Auth: Validate bearer token
 Auth->>Entra: Load tenant signing metadata and keys
 Entra-->>Auth: Tenant issuer metadata and signing keys
@@ -98,7 +98,7 @@ management happen before Agent Framework can invoke the downstream backend.
 
 ```mermaid
 flowchart TD
-Start["POST /a2a/{name}"] --> Auth{"Bearer authentication<br/>and authorization pass?"}
+Start["POST /copilot-studio/{name}/a2a"] --> Auth{"Bearer authentication<br/>and authorization pass?"}
 Auth -->|"No"| AuthError["Return HTTP 401 or 403"]
 Auth -->|"Yes"| Media{"Content-Type is<br/>application/json?"}
 Media -->|"No"| MediaError["Return HTTP 415 JSON-RPC error"]
@@ -134,15 +134,17 @@ capacity.
 
 ## Before running
 
-1. Install the .NET 10 LTS SDK. Dependencies are pinned in [src/CopilotStudioA2A/CopilotStudioA2A.csproj](src/CopilotStudioA2A/CopilotStudioA2A.csproj), reusing the example's Agent Framework and Copilot Studio SDK versions. A2A hosting packages are prerelease even though .NET 10 is LTS.
-2. Register a single-tenant Entra confidential application for this API. Expose the delegated scope `Agents.Invoke`, typically requested by clients as `api://<adapter-client-id>/Agents.Invoke`. Set the API registration's `api.requestedAccessTokenVersion` to `2`.
-3. On the same adapter registration, add the Power Platform API **delegated** permission `CopilotStudio.Copilots.Invoke`, and obtain the necessary tenant consent. Create a client secret for OBO; do not give this secret to callers.
-4. Give your separate calling application delegated access to the adapter's `Agents.Invoke` scope. Sign in a user with access to the published Copilot Studio specialist agent. The incoming token must target this API, not Microsoft Graph, Power Platform, or another application.
-5. Copy the published standard-harness agent's DirectConnectUrl from Copilot Studio. The initial implementation supports public-cloud URLs under the environment.api.powerplatform.com domain.
+Install the .NET 10 LTS SDK. Dependencies are pinned in
+[src/CopilotStudioA2A/CopilotStudioA2A.csproj](src/CopilotStudioA2A/CopilotStudioA2A.csproj).
+A2A hosting packages are prerelease even though .NET 10 is LTS.
 
-The adapter validates signatures against tenant-specific Entra metadata, RS256, issuer, audience, expiration, tenant, v2 token version, user object ID and the exact delegated `Agents.Invoke` scope. App-only tokens and application roles alone cannot invoke it. Missing/invalid credentials return HTTP 401; an authenticated caller without required claims returns HTTP 403.
+Publish the Copilot Studio specialist agent and copy its standard-harness
+`DirectConnectUrl`. The adapter currently accepts public-cloud URLs under the
+`environment.api.powerplatform.com` domain.
 
-See [Microsoft's Copilot Studio SDK guidance](https://learn.microsoft.com/microsoft-copilot-studio/publication-integrate-web-or-native-app-m365-agents-sdk) and [Entra OBO guidance](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-on-behalf-of-flow).
+## Microsoft Entra setup
+
+See [Microsoft Entra setup](docs/ENTRA-SETUP.md).
 
 ## Configuration and secrets
 
@@ -157,6 +159,7 @@ See [Microsoft's Copilot Studio SDK guidance](https://learn.microsoft.com/micros
 * `CoolAgent:DirectConnectUrl`: secret connection URL for the `CoolAgent` route
 * `CoolAgent:SkillDescription`: required agent-specific skill description, published in the public agent card
 * `Adapter:PublicBaseUrl`: externally advertised HTTPS origin; defaults to HTTP loopback for local Development
+* `Adapter:UseHardcodedBackend`: selects an offline backend that returns a fixed response without calling Copilot Studio; defaults to `false`
 * `AllowedHosts`: allowed hostnames, semicolon-separated; defaults to localhost
 
 For .NET user secrets, target [src/CopilotStudioA2A/CopilotStudioA2A.csproj](src/CopilotStudioA2A/CopilotStudioA2A.csproj). It already has a `UserSecretsId`. Use your editor's user-secrets management or the .NET user-secrets CLI locally. User secrets are outside source control but are not an encrypted vault.
@@ -180,7 +183,7 @@ Alternatively, use the indexed environment setting `Agents__0=CoolAgent`. A scal
 
 Startup behavior:
 
-* Every listed agent must have a nonblank `DirectConnectUrl` and `SkillDescription` in its own root section. Missing settings or an invalid connection URL fail startup; errors name the required keys, never their values.
+* Every listed agent must have a nonblank `SkillDescription` in its own root section. Normal operation also requires a valid `DirectConnectUrl`. Missing settings or an invalid connection URL fail startup; errors name the required keys, never their values.
 * A root section containing `DirectConnectUrl` or `SkillDescription` for an unlisted agent produces one startup warning. Its settings are ignored, even if incomplete or invalid. No endpoint, catalog entry or agent card is registered for it.
 * Unrelated configuration sections do not produce agent warnings. An agent is identified by the list, not inferred from settings.
 * Names preserve their configured casing, including `CoolAgent`. They must be unique case-insensitively, contain 1-63 ASCII letters, digits or hyphens, and start with a letter. Core section names `Agents`, `Adapter`, `Authentication`, `Logging`, `AllowedHosts`, and `CopilotStudio` are reserved.
@@ -189,29 +192,16 @@ Adding an agent requires adding its name to `Agents` and configuring its two set
 
 Names and skill descriptions are public discovery information; never put secrets in them. Connection URLs remain secret. The current `Agents` list in [src/CopilotStudioA2A/appsettings.json](src/CopilotStudioA2A/appsettings.json) controls local discovery; an App Service `Agents` setting can replace that list for deployment.
 
-## Run and test
+## Testing
 
-Open [CopilotStudioA2A.sln](CopilotStudioA2A.sln). Restore/build with the .NET tooling and launch the `CopilotStudioA2A` profile, which uses `http://localhost:5180` and Development configuration.
-
-For terminal use, run `dotnet restore CopilotStudioA2A.sln`, then `dotnet build CopilotStudioA2A.sln`, and `dotnet run --project src/CopilotStudioA2A`. Run offline tests with `dotnet test CopilotStudioA2A.sln`. These commands are instructions only; they have not been executed as part of implementation.
-
-[TESTING.md](TESTING.md) provides PowerShell commands for obtaining a delegated token and testing every endpoint. [requests/adapter.http](requests/adapter.http) provides the same health, catalog, discovery, message, and continuation requests for the optional VS Code REST Client extension. Agent cards remain the protocol discovery source.
-
-To test the actual application-to-Copilot Studio connection:
-
-1. Start the configured adapter.
-2. Obtain a delegated API access token through your calling application's interactive sign-in, using `api://<adapter-client-id>/Agents.Invoke`. Follow [TESTING.md](TESTING.md) to put it in the local `ADAPTER_ACCESS_TOKEN` environment variable. Never share the token here.
-3. Select an agent in [requests/adapter.http](requests/adapter.http), then send `firstTurn`. This invokes the real OBO and Copilot Studio path and can consume capacity or perform whatever actions that published agent allows.
-4. Verify `result.message.parts[].text` and save `result.message.contextId`. Send the continuation request to reuse the same downstream conversation.
-
-The health endpoint checks the running host, not Entra permissions or Copilot Studio reachability. Only sending a message exercises the full connection. No operational API bypasses authentication.
+See [Testing](docs/TESTING.md) for the three supported paths and the hardcoded backend.
 
 ## A2A contract
 
 This is a limited A2A 1.0 profile, not an implementation of every task-management operation.
 
-* Runtime: `POST /a2a/{name}`
-* Per-agent card: `GET /a2a/{name}/.well-known/agent-card.json` (application-specific discovery convention)
+* Runtime: `POST /copilot-studio/{name}/a2a`
+* Per-agent card: `GET /copilot-studio/{name}/a2a/.well-known/agent-card.json` (application-specific discovery convention)
 * Standard root card: `GET /.well-known/agent-card.json`, only when exactly one agent is configured
 * Authenticated catalog: `GET /agents`, exposing names and public URLs only
 * Anonymous health: `GET /health`
@@ -271,12 +261,6 @@ Application Insights is enabled when `APPLICATIONINSIGHTS_CONNECTION_STRING` is 
 SDK and HTTP-client logging are suppressed to avoid recording secret connection URLs and message content. Raw HTTP dependency instrumentation is filtered for the same reason. Exceptions are logged with a sanitized exception, original stack location, exception type and safe HTTP/MSAL codes, not SDK messages, response bodies, bearer tokens or secrets. Do not enable sensitive-data capture in production.
 
 For HTTP 401/403, verify audience, issuer, token version and delegated scope. For OBO errors, verify the confidential client's secret, delegated Power Platform permission and consent. For invalid agent responses, verify publication and text-only agent behavior. Delegated transport authentication does not implement an agent's separate interactive OAuth-card/connector sign-in flow; configure that flow before use or extend the adapter deliberately rather than forwarding arbitrary tokens to card-specified resources.
-
-## Verification status
-
-Offline tests cover profile validation, text translation, context isolation by agent, concurrent turns, signed JWT validation and the real Agent Framework HTTP boundary with a fake downstream backend. They do not replace the JWT handler with a permissive test handler, and network access is blocked in the integration fixture.
-
-Source and editor diagnostics were reviewed. Restore, compilation, test execution, infrastructure compilation/deployment and live Copilot Studio validation were not run. Perform those checks in your configured environment before relying on the adapter.
 
 ## References
 

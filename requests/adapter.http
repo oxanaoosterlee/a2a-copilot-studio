@@ -12,11 +12,11 @@ GET {{baseUrl}}/agents
 Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
 
 ### Discover this agent
-GET {{baseUrl}}/a2a/{{agent}}/.well-known/agent-card.json
+GET {{baseUrl}}/copilot-studio/{{agent}}/a2a/.well-known/agent-card.json
 
 ### End-to-end connection test: adapter -> delegated OBO -> Copilot Studio -> A2A text reply
 # @name firstTurn
-POST {{baseUrl}}/a2a/{{agent}}
+POST {{baseUrl}}/copilot-studio/{{agent}}/a2a
 Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
 Content-Type: application/json
 A2A-Version: 1.0
@@ -36,7 +36,7 @@ A2A-Version: 1.0
 }
 
 ### Continue the context returned by firstTurn (send firstTurn successfully first)
-POST {{baseUrl}}/a2a/{{agent}}
+POST {{baseUrl}}/copilot-studio/{{agent}}/a2a
 Authorization: Bearer {{$processEnv ADAPTER_ACCESS_TOKEN}}
 Content-Type: application/json
 A2A-Version: 1.0

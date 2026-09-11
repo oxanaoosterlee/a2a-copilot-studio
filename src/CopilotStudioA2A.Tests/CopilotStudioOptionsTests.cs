@@ -356,6 +356,20 @@ public sealed class CopilotStudioOptionsTests
         AssertSanitized(error, DirectConnectUrl, "synthetic-url-marker", "Skill for CoolAgent.", "Skill for BackupAgent.");
     }
 
+    /// <summary>Allows the unused connection URL to be absent when the hardcoded backend is selected.</summary>
+    [Fact]
+    public void GivenHardcodedBackend_WhenLoad_AllowsMissingDirectConnectUrl()
+    {
+        var settings = CreateSettings("CoolAgent");
+        settings.Remove("CoolAgent:DirectConnectUrl");
+        using var configuration = (ConfigurationRoot)new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
+
+        var options = CopilotStudioOptions.Load(configuration, requireDirectConnectUrl: false);
+
+        Assert.Equal("", options.Agents["CoolAgent"].DirectConnectUrl);
+        Assert.Equal("Skill for CoolAgent.", options.Agents["CoolAgent"].SkillDescription);
+    }
+
     /// <summary>Reports both required keys when an entire listed section is absent or blank.</summary>
     /// <param name="value">Null omits the section; otherwise both required fields receive this blank value.</param>
     [Theory]

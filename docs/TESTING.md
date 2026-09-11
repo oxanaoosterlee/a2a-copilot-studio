@@ -1,28 +1,49 @@
 ---
 title: Test the Copilot Studio A2A adapter
-description: PowerShell commands for obtaining a delegated token and testing every adapter endpoint and supported message flow.
-ms.date: 2026-09-09
+description: Practical steps for using the HTTP requests, console clients, and automated tests included in this repository.
+ms.date: 2026-09-11
 ms.topic: how-to
 ---
 
-## Prerequisites
+## Choose a test option
 
-Use PowerShell 7 or later. The commands use `Invoke-RestMethod` and keep the access
-token only in the current PowerShell process.
+Use one of these three options.
 
-Before requesting a token, create a separate single-tenant public client app
-registration for testing:
+| Option | Test path                                                                    | Best use                                            |
+|--------|------------------------------------------------------------------------------|-----------------------------------------------------|
+| 1      | HTTP client -> A2A adapter -> Copilot Studio specialist agent                | Test the full flow and inspect each request         |
+| 2      | .NET console client -> A2A adapter -> Copilot Studio specialist agent        | Run a quick full-flow test with one command         |
+| 3      | .NET console application -> Copilot Studio specialist agent                  | Test Copilot Studio without the A2A adapter         |
 
-1. Add the adapter API's delegated `Agents.Invoke` permission to the client app.
-2. Grant consent for that delegated permission.
-3. In **Authentication**, enable **Allow public client flows** for device code sign-in.
-4. Do not create or use a client secret for the test client.
+Options 1 and 2 can use the hardcoded adapter backend. This keeps the A2A endpoint,
+authentication, and request translation, but it does not call Copilot Studio. Option 3
+bypasses the adapter, so the adapter's hardcoded backend does not apply to it.
 
-The signed-in user must have access to the published Copilot Studio specialist agent.
-The adapter app registration remains a confidential client because it uses its own
-secret for the on-behalf-of exchange.
+Complete the app registration steps in [Microsoft Entra setup](ENTRA-SETUP.md) before
+you use a real signed-in user. Keep access tokens, client secrets, and direct connection
+URLs out of source control.
 
-Set the values for your environment:
+## Test code layout
+
+All test code is outside the main application project:
+
+* [tools/A2ATestClient](../tools/A2ATestClient) contains the .NET console client for
+    the A2A endpoint.
+* [tools/CopilotStudioDirectTest](../tools/CopilotStudioDirectTest) contains the small
+    .NET client that calls Copilot Studio directly.
+* [scripts/Invoke-A2ATestClient.ps1](../scripts/Invoke-A2ATestClient.ps1) is an optional
+    PowerShell client for the A2A endpoint.
+* [src/CopilotStudioA2A.Tests](../src/CopilotStudioA2A.Tests) contains the automated
+    unit and integration tests.
+
+The production application does not reference these projects or scripts. The two
+console projects are grouped under `tools` in the solution.
+
+## Common preparation
+
+Install the .NET 10 SDK. Use PowerShell 7 or later for the PowerShell examples.
+
+The examples use these values:
 
 ```powershell
 $BaseUrl = 'http://localhost:5180'
@@ -30,133 +51,86 @@ $TenantId = '<directory-tenant-id>'
 $AdapterClientId = '<adapter-api-client-id>'
 $TestClientId = '<public-test-client-id>'
 $Agent = 'CoolAgent'
-$Scope = "api://$AdapterClientId/Agents.Invoke"
+$RedirectUri = 'http://localhost'
 ```
 
-Start the adapter in another PowerShell session after configuring its user secrets:
+For real Copilot Studio tests, configure the adapter with:
+
+* `Authentication:TenantId`
+* `Authentication:ClientId`
+* `Authentication:Audience`, using the same bare client ID
+* `Authentication:RequiredScope`, using `Agents.Invoke`
+* `Authentication:ClientSecret`
+* `Agents`
+* `<agent-name>:SkillDescription`
+* `<agent-name>:DirectConnectUrl`
+
+Use .NET user secrets for the client secret and direct connection URL. Do not put
+these values in tracked configuration files.
+
+## Option 1: Test the complete flow with HTTP requests
+
+This option starts the adapter and lets you send each HTTP request yourself. It tests
+the full path from the A2A endpoint to the Copilot Studio specialist agent.
+
+### Start the adapter
+
+Start it in one PowerShell window:
 
 ```powershell
 dotnet run --project .\src\CopilotStudioA2A\CopilotStudioA2A.csproj
 ```
 
-## Get a delegated access token
+### Get an adapter access token
 
-The following commands use the Microsoft identity platform device authorization
-flow. Follow the sign-in message shown in the terminal. The script waits until sign-in
-finishes and then stores the API access token in `ADAPTER_ACCESS_TOKEN` for the current
-PowerShell process.
+Open a second PowerShell window. Dot-source the included test client so that its token
+function is available, then sign in:
 
 ```powershell
-$DeviceCodeUri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode"
-$TokenUri = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
+. .\scripts\Invoke-A2ATestClient.ps1
 
-$DeviceAuthorization = Invoke-RestMethod -Method Post -Uri $DeviceCodeUri -Body @{
-    client_id = $TestClientId
-    scope = $Scope
-}
-
-Write-Host $DeviceAuthorization.message
-$IntervalSeconds = [int]$DeviceAuthorization.interval
-$ExpiresAt = [DateTimeOffset]::UtcNow.AddSeconds([int]$DeviceAuthorization.expires_in)
-$TokenResponse = $null
-
-while ($null -eq $TokenResponse -and [DateTimeOffset]::UtcNow -lt $ExpiresAt) {
-    Start-Sleep -Seconds $IntervalSeconds
-
-    try {
-        $TokenResponse = Invoke-RestMethod -Method Post -Uri $TokenUri -Body @{
-            grant_type = 'urn:ietf:params:oauth:grant-type:device_code'
-            client_id = $TestClientId
-            device_code = $DeviceAuthorization.device_code
-        }
-    }
-    catch {
-        $OAuthError = $_.ErrorDetails.Message | ConvertFrom-Json
-        if ($OAuthError.error -eq 'authorization_pending') {
-            continue
-        }
-        if ($OAuthError.error -eq 'slow_down') {
-            $IntervalSeconds += 5
-            continue
-        }
-        throw
-    }
-}
-
-if ($null -eq $TokenResponse) {
-    throw 'Device sign-in expired before an access token was returned.'
-}
-
-$env:ADAPTER_ACCESS_TOKEN = $TokenResponse.access_token
-$Headers = @{ Authorization = "Bearer $env:ADAPTER_ACCESS_TOKEN" }
-Write-Host "Token received for scope: $($TokenResponse.scope)"
+$env:ADAPTER_ACCESS_TOKEN = Get-DeviceCodeAccessToken `
+    -DirectoryId $TenantId `
+    -ClientId $TestClientId `
+    -Scope "api://$AdapterClientId/Agents.Invoke"
 ```
+
+Follow the device sign-in message. The token stays in the current PowerShell process.
 
 > [!CAUTION]
-> Do not print, commit, paste, or share the token. Close the PowerShell session when
-> testing is complete. The token is for the adapter API, not Microsoft Graph or Power
-> Platform.
+> Do not print, commit, paste, or share the token.
 
-If sign-in returns a consent or public-client error, check the test client registration,
-its delegated permission to the adapter API, and tenant consent.
+### Send requests
 
-## Test health
+Open [the REST Client request file](../requests/adapter.http). Set `baseUrl` and
+`agent` at the top. Run these requests in order:
 
-The health endpoint is anonymous. It confirms that the adapter process is running. It
-does not contact Microsoft Entra ID or Copilot Studio.
+1. `Health` checks that the adapter process is running.
+2. `Configured agents` returns the authenticated agent catalog.
+3. `Discover this agent` returns the public agent card.
+4. `End-to-end connection test` sends the first message.
+5. `Continue the context` sends a second message in the same conversation.
 
-```powershell
-Invoke-RestMethod -Method Get -Uri "$BaseUrl/health"
-```
+A successful message response contains:
 
-Expected result: `status` is `healthy`.
+* `result.message.role` set to `ROLE_AGENT`
+* At least one text value in `result.message.parts`
+* A nonempty `result.message.contextId`
 
-## Test the authenticated agent catalog
+The health request does not test Microsoft Entra, OBO, or Copilot Studio. Only a
+successful message request tests the complete flow.
 
-```powershell
-$Catalog = Invoke-RestMethod -Method Get -Uri "$BaseUrl/agents" -Headers $Headers
-$Catalog | Format-Table name, endpoint, agentCard
-```
+### Send a request without the REST Client extension
 
-Expected result: each configured agent appears without its secret connection URL.
-
-## Test a per-agent discovery card
-
-The discovery card is anonymous.
+You can also send a first message from PowerShell:
 
 ```powershell
-$Card = Invoke-RestMethod -Method Get -Uri "$BaseUrl/a2a/$Agent/.well-known/agent-card.json"
-$Card | ConvertTo-Json -Depth 10
-```
-
-Expected result: the card advertises JSON-RPC version `1.0`, text input and output,
-and the configured skill description.
-
-## Test the standard root discovery card
-
-This route exists only when exactly one agent is configured.
-
-```powershell
-$RootCard = Invoke-RestMethod -Method Get -Uri "$BaseUrl/.well-known/agent-card.json"
-$RootCard | ConvertTo-Json -Depth 10
-```
-
-Expected result: the root card matches the only configured agent. With multiple agents,
-an HTTP 404 response is expected.
-
-## Start a conversation
-
-This request tests the complete path: API authentication, A2A validation, delegated
-on-behalf-of token exchange, Copilot Studio invocation, and A2A response translation.
-It can perform actions allowed by the published agent.
-
-```powershell
-$MessageHeaders = @{
+$Headers = @{
     Authorization = "Bearer $env:ADAPTER_ACCESS_TOKEN"
     'A2A-Version' = '1.0'
 }
 
-$FirstRequest = @{
+$Request = @{
     jsonrpc = '2.0'
     id = [guid]::NewGuid().ToString()
     method = 'SendMessage'
@@ -171,213 +145,175 @@ $FirstRequest = @{
                 }
             )
         }
-        configuration = @{
-            acceptedOutputModes = @('text/plain')
-            returnImmediately = $false
-        }
     }
 }
 
-$FirstTurn = Invoke-RestMethod `
+$Response = Invoke-RestMethod `
     -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
+    -Uri "$BaseUrl/copilot-studio/$Agent/a2a" `
+    -Headers $Headers `
     -ContentType 'application/json' `
-    -Body ($FirstRequest | ConvertTo-Json -Depth 10)
+    -Body ($Request | ConvertTo-Json -Depth 10)
 
-$FirstTurn | ConvertTo-Json -Depth 10
-$ContextId = $FirstTurn.result.message.contextId
+$Response | ConvertTo-Json -Depth 10
 ```
 
-Expected result: `result.message.role` is `ROLE_AGENT`, the response contains a text
-part, and `contextId` is not empty.
+## Option 2: Test the A2A endpoint with the .NET console client
 
-## Continue a conversation
+The separate .NET console client opens the system browser, signs in a user through
+authorization code flow with PKCE, gets an adapter access token, sends one A2A
+message, and prints the JSON response. It does not reference the main application
+project.
 
-Run this command in the same PowerShell session after starting a conversation.
+Start the adapter as shown in option 1. In another PowerShell window, set:
 
 ```powershell
-$NextRequest = @{
-    jsonrpc = '2.0'
-    id = [guid]::NewGuid().ToString()
-    method = 'SendMessage'
-    params = @{
-        message = @{
-            messageId = [guid]::NewGuid().ToString()
-            contextId = $ContextId
-            role = 'ROLE_USER'
-            parts = @(
-                @{ text = 'What was my previous message?' }
-            )
-        }
-    }
-}
-
-$NextTurn = Invoke-RestMethod `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
-    -ContentType 'application/json' `
-    -Body ($NextRequest | ConvertTo-Json -Depth 10)
-
-$NextTurn | ConvertTo-Json -Depth 10
+$env:A2A_TENANT_ID = '<directory-tenant-id>'
+$env:A2A_ADAPTER_CLIENT_ID = '<adapter-api-client-id>'
+$env:A2A_TEST_CLIENT_ID = '<public-test-client-id>'
+$env:A2A_AGENT = 'CoolAgent'
+$env:A2A_BASE_URL = 'http://localhost:5180'
+$env:A2A_REDIRECT_URI = 'http://localhost'
 ```
 
-Expected result: the response uses the same public `contextId`, and the agent can use
-its conversation history. Context state is lost when the adapter restarts.
-
-## Test multiple text parts
-
-The adapter joins separate text parts with a newline before sending one message to
-Copilot Studio.
+Run the client:
 
 ```powershell
-$PartsRequest = @{
-    jsonrpc = '2.0'
-    id = [guid]::NewGuid().ToString()
-    method = 'SendMessage'
-    params = @{
-        message = @{
-            messageId = [guid]::NewGuid().ToString()
-            role = 'ROLE_USER'
-            parts = @(
-                @{ text = 'First line.' }
-                @{ text = 'Second line.' }
-            )
-        }
-    }
-}
-
-Invoke-RestMethod `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
-    -ContentType 'application/json' `
-    -Body ($PartsRequest | ConvertTo-Json -Depth 10) |
-    ConvertTo-Json -Depth 10
+dotnet run --project .\tools\A2ATestClient -- 'Reply with a short greeting.'
 ```
 
-## Test authentication errors
+Complete sign-in in the browser. Microsoft Entra redirects to the local MSAL listener,
+which finishes the console login. A successful result contains an A2A agent message,
+a text part, and a context ID. The client does not print or save the access token.
 
-A request without a bearer token must return HTTP 401.
+This option tests the same live path as option 1. It is faster, but it does not provide
+separate commands for health, discovery, or conversation continuation.
+
+The PowerShell client remains available as a device-code alternative. Its test client
+registration must have public client flows enabled:
 
 ```powershell
-$Response = Invoke-WebRequest `
-    -Method Get `
-    -Uri "$BaseUrl/agents" `
-    -SkipHttpErrorCheck
-
-$Response.StatusCode
+.\scripts\Invoke-A2ATestClient.ps1 `
+    -TenantId '<directory-tenant-id>' `
+    -AdapterClientId '<adapter-api-client-id>' `
+    -TestClientId '<public-test-client-id>' `
+    -Agent 'CoolAgent' `
+    -Message 'Reply with a short greeting.'
 ```
 
-Expected result: `401`.
+## Option 3: Test Copilot Studio directly
 
-A valid token without the exact delegated `Agents.Invoke` scope must return HTTP 403.
-Use a token issued to the adapter API without that scope, if your test tenant provides
-one. Do not use an app-only token as a successful test token.
+Use the .NET console application included in this repository when you want to test the
+Copilot Studio specialist agent without the A2A adapter. It opens the system browser
+for authorization code flow with PKCE, does not save its token, and bypasses:
 
-## Test routing and protocol errors
+* The A2A endpoint and protocol validation
+* Adapter token validation
+* The OBO exchange
+* A2A text translation
+* The adapter conversation store
 
-An unknown agent must return HTTP 404 and a JSON-RPC error.
+Set the values in the current PowerShell window:
 
 ```powershell
-$UnknownAgentResponse = Invoke-WebRequest `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/not-configured" `
-    -Headers $MessageHeaders `
-    -ContentType 'application/json' `
-    -Body ($FirstRequest | ConvertTo-Json -Depth 10) `
-    -SkipHttpErrorCheck
-
-$UnknownAgentResponse.StatusCode
-$UnknownAgentResponse.Content | ConvertFrom-Json | ConvertTo-Json -Depth 10
+$env:COPILOT_STUDIO_TENANT_ID = '<directory-tenant-id>'
+$env:COPILOT_STUDIO_CLIENT_ID = '<public-test-client-id>'
+$env:COPILOT_STUDIO_DIRECT_CONNECT_URL = '<copilot-studio-direct-connect-url>'
+$env:COPILOT_STUDIO_REDIRECT_URI = 'http://localhost'
 ```
 
-Expected result: HTTP `404`.
-
-A request without `A2A-Version` must return JSON-RPC error `-32009`.
+Run the application:
 
 ```powershell
-$NoVersionHeaders = @{ Authorization = "Bearer $env:ADAPTER_ACCESS_TOKEN" }
-$NoVersion = Invoke-RestMethod `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $NoVersionHeaders `
-    -ContentType 'application/json' `
-    -Body ($FirstRequest | ConvertTo-Json -Depth 10)
-
-$NoVersion.error
+dotnet run --project .\tools\CopilotStudioDirectTest -- 'Reply with a short greeting.'
 ```
 
-A streaming request must return unsupported-operation error `-32004`.
+Complete sign-in in the browser. A successful test prints the text returned by the
+Copilot Studio specialist agent.
+
+Clear the secret connection URL when the test is complete:
 
 ```powershell
-$StreamingRequest = $FirstRequest.Clone()
-$StreamingRequest.method = 'SendStreamingMessage'
-
-$Streaming = Invoke-RestMethod `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
-    -ContentType 'application/json' `
-    -Body ($StreamingRequest | ConvertTo-Json -Depth 10)
-
-$Streaming.error
+Remove-Item Env:COPILOT_STUDIO_DIRECT_CONNECT_URL -ErrorAction SilentlyContinue
 ```
 
-An unsupported content type must return HTTP 415.
+Do not use this option to prove that A2A or OBO works. Use option 1 or 2 for that.
+
+## Use the hardcoded adapter backend
+
+The hardcoded backend returns `This is a hardcoded response.` It does not need an
+adapter client secret or an agent direct connection URL. The adapter still validates
+the caller's bearer token, so the adapter API and public test client registrations are
+still required.
+
+Set the hardcoded option in the PowerShell window that starts the adapter:
 
 ```powershell
-$MediaResponse = Invoke-WebRequest `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
-    -ContentType 'text/plain' `
-    -Body 'not JSON' `
-    -SkipHttpErrorCheck
-
-$MediaResponse.StatusCode
+$env:Adapter__UseHardcodedBackend = 'true'
+dotnet run --project .\src\CopilotStudioA2A\CopilotStudioA2A.csproj
 ```
 
-Expected result: `415`.
+Then use option 1 or option 2 without changing the client command. A successful A2A
+response contains the fixed text.
 
-An unknown conversation context must return JSON-RPC error `-32602`.
+Option 3 cannot use this setting because it does not run or call the adapter. For an
+offline console-to-A2A check, use option 2 with the hardcoded adapter backend.
+
+Clear the setting before a real Copilot Studio test:
 
 ```powershell
-$UnknownContextRequest = @{
-    jsonrpc = '2.0'
-    id = [guid]::NewGuid().ToString()
-    method = 'SendMessage'
-    params = @{
-        message = @{
-            messageId = [guid]::NewGuid().ToString()
-            contextId = 'unknown-context'
-            role = 'ROLE_USER'
-            parts = @(@{ text = 'Continue this conversation.' })
-        }
-    }
-}
-
-$UnknownContext = Invoke-RestMethod `
-    -Method Post `
-    -Uri "$BaseUrl/a2a/$Agent" `
-    -Headers $MessageHeaders `
-    -ContentType 'application/json' `
-    -Body ($UnknownContextRequest | ConvertTo-Json -Depth 10)
-
-$UnknownContext.error
+Remove-Item Env:Adapter__UseHardcodedBackend -ErrorAction SilentlyContinue
 ```
 
-## Clear the token
+## Run the automated tests
 
-Remove the token from the current PowerShell process when testing is complete:
+The automated tests use local test servers and fake backends. They do not contact
+Microsoft Entra or Copilot Studio.
+
+```powershell
+dotnet test .\CopilotStudioA2A.sln
+```
+
+The tests cover the A2A profile, text translation, authentication rules, conversation
+handling, configuration, the HTTP boundary, and the hardcoded backend. They do not
+replace a live option 1 or option 2 test.
+
+## Expected errors
+
+| Result            | Meaning                                                     | Check                                           |
+|-------------------|-------------------------------------------------------------|-------------------------------------------------|
+| HTTP `401`        | The token is missing or invalid                             | Token audience, issuer, signature, and expiry   |
+| HTTP `403`        | The caller does not have the required delegated scope       | The `Agents.Invoke` scope and consent            |
+| HTTP `404`        | The agent route is not configured                           | The `Agents` list and route name                 |
+| JSON-RPC `-32009` | The A2A version is missing or invalid                       | The `A2A-Version: 1.0` header                    |
+| JSON-RPC `-32004` | The requested A2A operation is not supported                | Use synchronous `SendMessage`                   |
+| JSON-RPC `-32602` | The message or context is invalid                           | Required message fields and current context ID  |
+| HTTP `415`        | The request content type is not supported                   | Use `application/json`                          |
+
+For OBO errors, check the adapter secret, Power Platform delegated permission, and
+consent. For direct test errors, check the direct connection URL, publication state,
+and the signed-in user's access to the Copilot Studio specialist agent.
+
+## Clean up local values
+
+Close the PowerShell windows after testing, or remove the values:
 
 ```powershell
 Remove-Item Env:ADAPTER_ACCESS_TOKEN -ErrorAction SilentlyContinue
-Remove-Variable TokenResponse, Headers, MessageHeaders -ErrorAction SilentlyContinue
+Remove-Item Env:COPILOT_STUDIO_DIRECT_CONNECT_URL -ErrorAction SilentlyContinue
+Remove-Item Env:Adapter__UseHardcodedBackend -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_TENANT_ID -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_ADAPTER_CLIENT_ID -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_TEST_CLIENT_ID -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_AGENT -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_BASE_URL -ErrorAction SilentlyContinue
+Remove-Item Env:A2A_REDIRECT_URI -ErrorAction SilentlyContinue
+Remove-Item Env:COPILOT_STUDIO_REDIRECT_URI -ErrorAction SilentlyContinue
 ```
 
-## References
+## Verification status
 
-* [Microsoft identity platform device authorization flow](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code)
-* [Configure client access to a web API](https://learn.microsoft.com/entra/identity-platform/quickstart-configure-app-access-web-apis)
+The source and editor diagnostics were reviewed. Restore, compilation, automated test
+execution, infrastructure deployment, and live Copilot Studio tests were not run as
+part of the implementation. Run the checks that match your environment before you
+use the adapter.

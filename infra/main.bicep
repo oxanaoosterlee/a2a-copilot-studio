@@ -231,5 +231,5 @@ resource appSettings 'Microsoft.Web/sites/config@2025-03-01' = {
 
 /* Outputs */
 
-@description('Application base URL. The deployed runtime serves each configured agent at /a2a/{name}; no secrets are output.')
+@description('Application base URL. The deployed runtime serves each configured agent at /copilot-studio/{name}/a2a; no secrets are output.')
 output appUrl string = 'https://${app.properties.defaultHostName}'

@@ -142,9 +142,9 @@ public sealed class AgentConfigurationIntegrationTests
         using var rootCard = await client.GetAsync("/.well-known/agent-card.json");
         Assert.Equal(HttpStatusCode.OK, rootCard.StatusCode);
         Assert.Equal("support", (await TestRequests.ReadResponseAsync(rootCard)).GetProperty("name").GetString());
-        using var card = await client.GetAsync("/a2a/UnlistedAgent/.well-known/agent-card.json");
+        using var card = await client.GetAsync("/copilot-studio/UnlistedAgent/a2a/.well-known/agent-card.json");
         Assert.Equal(HttpStatusCode.NotFound, card.StatusCode);
-        using var response = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/a2a/UnlistedAgent");
+        using var response = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/copilot-studio/UnlistedAgent/a2a");
         var error = await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidParams, HttpStatusCode.NotFound);
         Assert.Equal("Unknown agent.", error.GetProperty("error").GetProperty("message").GetString());
         Assert.Empty(factory.Backend.Calls);
@@ -165,14 +165,14 @@ public sealed class AgentConfigurationIntegrationTests
         Assert.Equal(new[] { "CoolAgent", "BackupAgent" }, catalog.EnumerateArray()
             .Select(agent => agent.GetProperty("name").GetString()).ToArray());
         var entry = Assert.Single(catalog.EnumerateArray().Where(agent => agent.GetProperty("name").GetString() == name));
-        Assert.Equal($"https://localhost/a2a/{name}", entry.GetProperty("endpoint").GetString());
-        Assert.Equal($"https://localhost/a2a/{name}/.well-known/agent-card.json", entry.GetProperty("agentCard").GetString());
+        Assert.Equal($"https://localhost/copilot-studio/{name}/a2a", entry.GetProperty("endpoint").GetString());
+        Assert.Equal($"https://localhost/copilot-studio/{name}/a2a/.well-known/agent-card.json", entry.GetProperty("agentCard").GetString());
 
-        using var cardResponse = await client.GetAsync($"/a2a/{name}/.well-known/agent-card.json");
+        using var cardResponse = await client.GetAsync($"/copilot-studio/{name}/a2a/.well-known/agent-card.json");
         Assert.Equal(HttpStatusCode.OK, cardResponse.StatusCode);
         var card = await TestRequests.ReadResponseAsync(cardResponse);
         Assert.Equal(name, card.GetProperty("name").GetString());
-        Assert.Equal($"https://localhost/a2a/{name}", Assert.Single(card.GetProperty("supportedInterfaces").EnumerateArray())
+        Assert.Equal($"https://localhost/copilot-studio/{name}/a2a", Assert.Single(card.GetProperty("supportedInterfaces").EnumerateArray())
             .GetProperty("url").GetString());
         var skill = Assert.Single(card.GetProperty("skills").EnumerateArray());
         Assert.Equal(name, skill.GetProperty("id").GetString());
@@ -181,14 +181,14 @@ public sealed class AgentConfigurationIntegrationTests
         Assert.Empty(factory.Backend.Calls);
 
         using var firstResponse = await AdapterWebApplicationFactory.SendAsync(client, firstToken,
-            TestRequests.Create("first turn").ToJsonString(), $"/a2a/{name}");
+            TestRequests.Create("first turn").ToJsonString(), $"/copilot-studio/{name}/a2a");
         var first = await TestRequests.AssertMessageAsync(firstResponse, $"{name}: first turn");
         var contextId = first.GetProperty("contextId").GetString()!;
         var secondToken = factory.CreateToken(TestIdentity.WithClaim("oid", TestIdentity.OtherObjectId));
         Assert.NotEqual(firstToken, secondToken);
         // Route matching may be insensitive, but keyed services and the advertised identity retain configured case.
         using var secondResponse = await AdapterWebApplicationFactory.SendAsync(client, secondToken,
-            TestRequests.Create("follow-up only", contextId).ToJsonString(), $"/a2a/{name.ToLowerInvariant()}");
+            TestRequests.Create("follow-up only", contextId).ToJsonString(), $"/copilot-studio/{name.ToLowerInvariant()}/a2a");
         var second = await TestRequests.AssertMessageAsync(secondResponse, $"{name}: follow-up only");
 
         Assert.Equal(contextId, second.GetProperty("contextId").GetString());
@@ -225,28 +225,28 @@ public sealed class AgentConfigurationIntegrationTests
             configureSettings: ConfigureMixedCaseAgents);
         using var client = factory.CreateLocalClient();
         var token = factory.CreateToken();
-        using var firstResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/a2a/CoolAgent");
+        using var firstResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/copilot-studio/CoolAgent/a2a");
         var first = await TestRequests.AssertMessageAsync(firstResponse, "CoolAgent: Hello");
         var firstContext = first.GetProperty("contextId").GetString()!;
 
         // Both transitions execute the real middleware's keyed AgentSessionStore/AIAgent resolution and deletion.
-        using var backupResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/a2a/BackupAgent");
+        using var backupResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/copilot-studio/BackupAgent/a2a");
         var backup = await TestRequests.AssertMessageAsync(backupResponse, "BackupAgent: Hello");
         var backupContext = backup.GetProperty("contextId").GetString()!;
         using var staleCool = await AdapterWebApplicationFactory.SendAsync(client, token,
-            TestRequests.Create(contextId: firstContext).ToJsonString(), "/a2a/CoolAgent");
+            TestRequests.Create(contextId: firstContext).ToJsonString(), "/copilot-studio/CoolAgent/a2a");
         await TestRequests.AssertErrorAsync(staleCool, A2AErrorCode.InvalidParams);
         Assert.Equal(2, factory.Backend.Calls.Count);
 
         using var backupNextResponse = await AdapterWebApplicationFactory.SendAsync(client, token,
-            TestRequests.Create("still retained", backupContext).ToJsonString(), "/a2a/BackupAgent");
+            TestRequests.Create("still retained", backupContext).ToJsonString(), "/copilot-studio/BackupAgent/a2a");
         var backupNext = await TestRequests.AssertMessageAsync(backupNextResponse, "BackupAgent: still retained");
         Assert.Equal(backupContext, backupNext.GetProperty("contextId").GetString());
-        using var newCoolResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/a2a/CoolAgent");
+        using var newCoolResponse = await AdapterWebApplicationFactory.SendAsync(client, token, path: "/copilot-studio/CoolAgent/a2a");
         var newCool = await TestRequests.AssertMessageAsync(newCoolResponse, "CoolAgent: Hello");
         Assert.NotEqual(firstContext, newCool.GetProperty("contextId").GetString());
         using var staleBackup = await AdapterWebApplicationFactory.SendAsync(client, token,
-            TestRequests.Create(contextId: backupContext).ToJsonString(), "/a2a/BackupAgent");
+            TestRequests.Create(contextId: backupContext).ToJsonString(), "/copilot-studio/BackupAgent/a2a");
         await TestRequests.AssertErrorAsync(staleBackup, A2AErrorCode.InvalidParams);
 
         Assert.Collection(factory.Backend.Calls,

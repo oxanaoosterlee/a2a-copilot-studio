@@ -5,8 +5,8 @@ namespace CopilotStudioA2A;
 /// </summary>
 internal static class AgentDiscovery
 {
-    public static string RuntimePath(string name) => $"/a2a/{name}";
-    public static string CardPath(string name) => $"/a2a/{name}/.well-known/agent-card.json";
+    public static string RuntimePath(string name) => $"/copilot-studio/{name}/a2a";
+    public static string CardPath(string name) => $"/copilot-studio/{name}/a2a/.well-known/agent-card.json";
 
     public static object CreateCard(string name, AdapterOptions options, CopilotAgentOptions agentOptions) => new
     {
