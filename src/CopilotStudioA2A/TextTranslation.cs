@@ -10,7 +10,7 @@ namespace CopilotStudioA2A;
 /// </summary>
 internal static class TextTranslation
 {
-    public static string FromA2A(JsonElement message)
+    public static string FromA2A(JsonElement message, string version = A2AProfile.Version)
     {
         if (!message.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array || parts.GetArrayLength() == 0)
         {
@@ -20,7 +20,18 @@ internal static class TextTranslation
         var texts = new List<string>();
         foreach (var part in parts.EnumerateArray())
         {
-            A2AProfile.OnlyProperties(part, "text", "raw", "url", "data", "mediaType", "metadata", "filename");
+            A2AProfile.RequireObject(part);
+            if (version == A2AProfile.LegacyVersion)
+            {
+                var kind = A2AProfile.RequiredString(part, "kind");
+                if (kind is "file" or "data")
+                    throw A2AProfile.Error(A2AErrorCode.ContentTypeNotSupported, "Only text parts are supported; files and data are not accepted.");
+                if (kind != "text")
+                    throw A2AProfile.Error(A2AErrorCode.InvalidParams, "Text parts must have kind text for A2A 0.3.");
+                texts.Add(A2AProfile.RequiredString(part, "text"));
+                continue;
+            }
+
             var representations = new[] { "text", "raw", "url", "data" }.Count(name => A2AProfile.HasValue(part, name));
             if (representations != 1)
                 throw A2AProfile.Error(A2AErrorCode.InvalidParams, "Each part must contain exactly one representation.");
@@ -28,8 +39,6 @@ internal static class TextTranslation
                 throw A2AProfile.Error(A2AErrorCode.ContentTypeNotSupported, "Only text parts are supported; files, URLs and data are not accepted.");
             if (A2AProfile.HasValue(part, "mediaType") && A2AProfile.RequiredString(part, "mediaType") != A2AProfile.MediaType)
                 throw A2AProfile.Error(A2AErrorCode.ContentTypeNotSupported, "Only text/plain input is supported.");
-            if (A2AProfile.HasValue(part, "metadata") || A2AProfile.HasValue(part, "filename"))
-                throw A2AProfile.Error(A2AErrorCode.UnsupportedOperation, "Part metadata and filenames are not supported.");
             texts.Add(A2AProfile.RequiredString(part, "text"));
         }
 

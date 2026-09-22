@@ -9,9 +9,17 @@ namespace CopilotStudioA2A;
 internal static class A2AProfile
 {
     internal const string Version = "1.0";
+    internal const string LegacyVersion = "0.3";
     internal const string MediaType = "text/plain";
 
-    public static UserMessage Read(JsonElement root, string version)
+    internal static string? SelectVersion(string? header) => header?.Trim() switch
+    {
+        null or "" or LegacyVersion => LegacyVersion,
+        Version => Version,
+        _ => null
+    };
+
+    public static UserMessage Read(JsonElement root, string? version)
     {
         if (root.ValueKind != JsonValueKind.Object ||
             !root.TryGetProperty("jsonrpc", out var rpc) || rpc.ValueKind != JsonValueKind.String || rpc.GetString() != "2.0" ||
@@ -23,46 +31,55 @@ internal static class A2AProfile
         }
 
         RejectDuplicateProperties(root);
-        if (version != Version)
-        {
-            throw Error(A2AErrorCode.VersionNotSupported, "Use the A2A-Version: 1.0 HTTP header. Only version 1.0 is supported.");
-        }
+        version = SelectVersion(version) ?? throw Error(A2AErrorCode.VersionNotSupported,
+            "Use A2A-Version: 0.3 or 1.0. An absent or empty header selects 0.3.");
+        var legacy = version == LegacyVersion;
 
         var methodName = method.GetString();
-        if (methodName != "SendMessage")
+        var sendMethod = legacy ? "message/send" : "SendMessage";
+        if (methodName != sendMethod)
         {
-            var code = methodName switch
+            var code = (legacy, methodName) switch
             {
-                "CreateTaskPushNotificationConfig" or "GetTaskPushNotificationConfig" or
-                "ListTaskPushNotificationConfigs" or "DeleteTaskPushNotificationConfig" => A2AErrorCode.PushNotificationNotSupported,
-                "SendStreamingMessage" or "SubscribeToTask" or "GetTask" or "ListTasks" or "CancelTask" => A2AErrorCode.UnsupportedOperation,
-                "GetExtendedAgentCard" => A2AErrorCode.ExtendedAgentCardNotConfigured,
+                (true, "tasks/pushNotificationConfig/set" or "tasks/pushNotificationConfig/get" or
+                    "tasks/pushNotificationConfig/list" or "tasks/pushNotificationConfig/delete") => A2AErrorCode.PushNotificationNotSupported,
+                (true, "message/stream" or "tasks/resubscribe" or "tasks/get" or "tasks/cancel") => A2AErrorCode.UnsupportedOperation,
+                (true, "agent/getAuthenticatedExtendedCard") => A2AErrorCode.ExtendedAgentCardNotConfigured,
+                (false, "CreateTaskPushNotificationConfig" or "GetTaskPushNotificationConfig" or
+                    "ListTaskPushNotificationConfigs" or "DeleteTaskPushNotificationConfig") => A2AErrorCode.PushNotificationNotSupported,
+                (false, "SendStreamingMessage" or "SubscribeToTask" or "GetTask" or "ListTasks" or "CancelTask") => A2AErrorCode.UnsupportedOperation,
+                (false, "GetExtendedAgentCard") => A2AErrorCode.ExtendedAgentCardNotConfigured,
                 _ => A2AErrorCode.MethodNotFound
             };
-            throw Error(code, "Only SendMessage is available; tasks, streaming and push notifications are not supported.");
+            throw Error(code, $"Only {sendMethod} is available for A2A {version}; tasks, streaming and push notifications are not supported.");
         }
 
         var parameters = RequiredObject(root, "params");
-        OnlyProperties(parameters, "message", "configuration", "metadata", "tenant");
-        RejectNonempty(parameters, "metadata");
-        RejectNonempty(parameters, "tenant");
         var message = RequiredObject(parameters, "message");
-        OnlyProperties(message, "messageId", "contextId", "role", "parts", "taskId", "metadata", "extensions", "referenceTaskIds");
-        var messageId = RequiredString(message, "messageId");
-        if (RequiredString(message, "role") != "ROLE_USER")
+        if (legacy)
         {
-            throw Error(A2AErrorCode.InvalidParams, "message.role must be ROLE_USER.");
+            if (RequiredString(message, "kind") != "message")
+                throw Error(A2AErrorCode.InvalidParams, "message.kind must be message for A2A 0.3.");
+        }
+        var messageId = RequiredString(message, "messageId");
+        var userRole = legacy ? "user" : "ROLE_USER";
+        if (RequiredString(message, "role") != userRole)
+        {
+            throw Error(A2AErrorCode.InvalidParams, $"message.role must be {userRole} for A2A {version}.");
         }
         if (HasValue(message, "taskId"))
         {
             throw Error(A2AErrorCode.TaskNotFound, "This adapter does not create or resume tasks.");
         }
-        foreach (var field in new[] { "metadata", "extensions", "referenceTaskIds" })
-        {
-            RejectNonempty(message, field);
-        }
 
-        var contextId = HasValue(message, "contextId") ? RequiredString(message, "contextId") : null;
+        string? contextId = null;
+        if (HasValue(message, "contextId"))
+        {
+            var context = message.GetProperty("contextId");
+            if (context.ValueKind != JsonValueKind.String)
+                throw Error(A2AErrorCode.InvalidParams, "contextId must be a string or null.");
+            contextId = string.IsNullOrWhiteSpace(context.GetString()) ? null : context.GetString();
+        }
         if (messageId.Length > 256 || contextId?.Length > 256)
         {
             throw Error(A2AErrorCode.InvalidParams, "Message and context identifiers must be at most 256 characters.");
@@ -70,10 +87,10 @@ internal static class A2AProfile
 
         if (parameters.TryGetProperty("configuration", out var configuration) && configuration.ValueKind != JsonValueKind.Null)
         {
-            ValidateConfiguration(configuration);
+            ValidateConfiguration(configuration, legacy);
         }
 
-        return new UserMessage(messageId, contextId, TextTranslation.FromA2A(message));
+        return new UserMessage(messageId, contextId, TextTranslation.FromA2A(message, version));
     }
 
     public static A2AException Error(A2AErrorCode code, string message) => new(message, code);
@@ -91,18 +108,11 @@ internal static class A2AProfile
         return value.GetString()!;
     }
 
-    internal static void OnlyProperties(JsonElement element, params string[] names)
+    internal static void RequireObject(JsonElement element)
     {
         if (element.ValueKind != JsonValueKind.Object)
         {
             throw Error(A2AErrorCode.InvalidParams, "An object was expected.");
-        }
-        foreach (var property in element.EnumerateObject())
-        {
-            if (!names.Contains(property.Name, StringComparer.Ordinal))
-            {
-                throw Error(A2AErrorCode.InvalidParams, "The request contains a field outside the supported A2A 1.0 text profile.");
-            }
         }
     }
 
@@ -115,17 +125,19 @@ internal static class A2AProfile
         return value;
     }
 
-    private static void ValidateConfiguration(JsonElement configuration)
+    private static void ValidateConfiguration(JsonElement configuration, bool legacy)
     {
-        OnlyProperties(configuration, "acceptedOutputModes", "returnImmediately", "historyLength", "taskPushNotificationConfig");
-        if (HasValue(configuration, "taskPushNotificationConfig"))
+        var executionMode = legacy ? "blocking" : "returnImmediately";
+        var pushConfig = legacy ? "pushNotificationConfig" : "taskPushNotificationConfig";
+        RequireObject(configuration);
+        if (HasValue(configuration, pushConfig))
         {
             throw Error(A2AErrorCode.PushNotificationNotSupported, "Push notifications are not supported.");
         }
-        if (HasValue(configuration, "returnImmediately") &&
-            configuration.GetProperty("returnImmediately").ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        if (HasValue(configuration, executionMode) &&
+            configuration.GetProperty(executionMode).ValueKind is not (JsonValueKind.True or JsonValueKind.False))
         {
-            throw Error(A2AErrorCode.InvalidParams, "returnImmediately must be a boolean; it has no effect for direct message responses.");
+            throw Error(A2AErrorCode.InvalidParams, $"{executionMode} must be a boolean; it has no effect for direct message responses.");
         }
         if (HasValue(configuration, "historyLength"))
         {
@@ -147,16 +159,6 @@ internal static class A2AProfile
                 throw Error(A2AErrorCode.ContentTypeNotSupported, "Only text/plain output is supported.");
             }
         }
-    }
-
-    private static void RejectNonempty(JsonElement element, string name)
-    {
-        if (!HasValue(element, name)) return;
-        var value = element.GetProperty(name);
-        if ((value.ValueKind == JsonValueKind.Array && value.GetArrayLength() == 0) ||
-            (value.ValueKind == JsonValueKind.Object && !value.EnumerateObject().Any()) ||
-            (value.ValueKind == JsonValueKind.String && value.GetString() == "")) return;
-        throw Error(A2AErrorCode.UnsupportedOperation, $"{name} is not supported by this text-only adapter.");
     }
 
     private static void RejectDuplicateProperties(JsonElement element)

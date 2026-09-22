@@ -29,11 +29,15 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
 
         var agentName = route.AgentName ?? http.Request.RouteValues["agentName"]?.ToString() ?? "";
         var correlationId = Activity.Current?.TraceId.ToString() ?? Guid.NewGuid().ToString("N");
+        var hadVersionHeader = http.Request.Headers.ContainsKey("A2A-Version");
+        var originalVersionHeader = http.Request.Headers["A2A-Version"];
+        var version = A2AProfile.SelectVersion(originalVersionHeader.ToString());
         http.Response.Headers["X-Correlation-ID"] = correlationId;
-        http.Response.Headers["A2A-Version"] = A2AProfile.Version;
+        SetResponseVersion(http, version);
         http.Response.Headers.CacheControl = "no-store";
         JsonElement? requestId = null;
         var originalBody = http.Request.Body;
+        var originalContentLength = http.Request.ContentLength;
         var originalResponse = http.Response.Body;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(http.RequestAborted);
         timeout.CancelAfter(TimeSpan.FromSeconds(options.RequestTimeoutSeconds));
@@ -50,7 +54,7 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
             using var document = await JsonDocument.ParseAsync(body, new JsonDocumentOptions { MaxDepth = 32 }, timeout.Token);
             var root = document.RootElement;
             if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("id", out var id) &&
-                id.ValueKind is JsonValueKind.String or JsonValueKind.Number)
+                (id.ValueKind == JsonValueKind.String || (id.ValueKind == JsonValueKind.Number && id.TryGetInt64(out _))))
                 requestId = id.Clone();
 
             if (!agents.Agents.ContainsKey(agentName))
@@ -59,7 +63,7 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
                 return;
             }
 
-            var input = A2AProfile.Read(root, http.Request.Headers["A2A-Version"].ToString());
+            var input = A2AProfile.Read(root, originalVersionHeader.ToString());
             // TODO: Link each context ID and conversation ID to the authenticated user. Reject the request if the IDs belong to another user.
             using var lease = await conversations.OpenAsync(agentName, input.ContextId, timeout.Token);
             if (lease.Evicted is { } evicted)
@@ -78,17 +82,19 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
                 CancellationToken = timeout.Token
             };
 
-            // Give the framework the server-owned A2A context, distinct from the downstream ID.
-            var normalized = JsonNode.Parse(root.GetRawText())!;
-            normalized["params"]!["message"]!["contextId"] = lease.Conversation.ContextId;
+            // Only validated canonical 1.0 data reaches the framework, with the server-owned context.
+            var normalized = A2AWireFormat.CreateFrameworkRequest(root, input, lease.Conversation.ContextId, version!);
             using var requestBuffer = new MemoryStream(Encoding.UTF8.GetBytes(normalized.ToJsonString()));
             using var responseBuffer = new MemoryStream();
             http.Request.Body = requestBuffer;
             http.Request.ContentLength = requestBuffer.Length;
+            http.Request.Headers["A2A-Version"] = A2AProfile.Version;
             http.Response.Body = responseBuffer;
             InvocationContext.Current = invocation;
             await next(http);
             http.Response.Body = originalResponse;
+            SetResponseVersion(http, version);
+            http.Response.Headers.CacheControl = "no-store";
 
             if (invocation.Failure is not null)
             {
@@ -100,10 +106,10 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
             var response = await JsonNode.ParseAsync(responseBuffer, cancellationToken: timeout.Token);
             if (response?["result"]?["message"] is JsonObject message)
             {
-                message["contextId"] = lease.Conversation.ContextId;
+                var outgoing = A2AWireFormat.CreateResponse(root.GetProperty("id"), message, lease.Conversation.ContextId, version!);
                 lease.Succeeded = true;
                 http.Response.ContentLength = null;
-                await http.Response.WriteAsJsonAsync(response, http.RequestAborted);
+                await http.Response.WriteAsJsonAsync(outgoing, http.RequestAborted);
             }
             else
             {
@@ -119,6 +125,8 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
         catch (Exception exception)
         {
             http.Response.Body = originalResponse;
+            SetResponseVersion(http, version);
+            http.Response.Headers.CacheControl = "no-store";
             var error = exception switch
             {
                 A2AException protocol => protocol,
@@ -136,9 +144,18 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
         finally
         {
             http.Request.Body = originalBody;
+            http.Request.ContentLength = originalContentLength;
+            if (hadVersionHeader) http.Request.Headers["A2A-Version"] = originalVersionHeader;
+            else http.Request.Headers.Remove("A2A-Version");
             http.Response.Body = originalResponse;
             InvocationContext.Clear();
         }
+    }
+
+    private static void SetResponseVersion(HttpContext http, string? version)
+    {
+        if (version is null) http.Response.Headers.Remove("A2A-Version");
+        else http.Response.Headers["A2A-Version"] = version;
     }
 
     private static async Task<MemoryStream> ReadBodyAsync(HttpRequest request, int limit, CancellationToken cancellationToken)
@@ -168,11 +185,22 @@ internal sealed class A2ARequestMiddleware(RequestDelegate next, ILogger<A2ARequ
     {
         http.Response.StatusCode = statusCode;
         http.Response.ContentLength = null;
+        // The supported profile uses shared JSON-RPC and A2A error codes in both versions.
+        // -32007 is AuthenticatedExtendedCardNotConfigured in 0.3 and ExtendedAgentCardNotConfigured in 1.0.
+        var error = new JsonObject { ["code"] = (int)exception.ErrorCode, ["message"] = exception.Message };
+        if (exception.ErrorCode == A2AErrorCode.VersionNotSupported)
+        {
+            // Negotiation failed: no response version was selected, and no silent fallback is performed.
+            error["data"] = new JsonObject
+            {
+                ["supportedVersions"] = new JsonArray(A2AProfile.LegacyVersion, A2AProfile.Version)
+            };
+        }
         return http.Response.WriteAsJsonAsync(new
         {
             jsonrpc = "2.0",
             id,
-            error = new { code = (int)exception.ErrorCode, message = exception.Message }
+            error
         }, http.RequestAborted);
     }
 }

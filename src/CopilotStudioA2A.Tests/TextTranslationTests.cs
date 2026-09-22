@@ -36,7 +36,7 @@ public sealed class TextTranslationTests
         Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
     }
 
-    /// <summary>Rejects ambiguous representations, nontext media and unsupported part properties.</summary>
+    /// <summary>Rejects ambiguous representations and nontext media.</summary>
     /// <param name="part">An invalid part.</param>
     /// <param name="code">The expected error.</param>
     [Theory]
@@ -59,9 +59,6 @@ public sealed class TextTranslationTests
     [InlineData("{\"text\":\"hello\",\"mediaType\":\"text/html\"}", A2AErrorCode.ContentTypeNotSupported)]
     [InlineData("{\"text\":\"hello\",\"mediaType\":\"text/plain; charset=utf-8\"}", A2AErrorCode.ContentTypeNotSupported)]
     [InlineData("{\"text\":\"hello\",\"mediaType\":42}", A2AErrorCode.InvalidParams)]
-    [InlineData("{\"text\":\"hello\",\"metadata\":{}}", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("{\"text\":\"hello\",\"filename\":\"file.txt\"}", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("{\"text\":\"hello\",\"kind\":\"text\"}", A2AErrorCode.InvalidParams)]
     public void GivenUnsupportedPart_WhenFromA2A_ReturnsSpecificError(string part, A2AErrorCode code)
     {
         using var document = JsonDocument.Parse("{\"parts\":[" + part + "]}");
@@ -69,6 +66,19 @@ public sealed class TextTranslationTests
         var exception = Assert.Throws<A2AException>(() => TextTranslation.FromA2A(document.RootElement));
 
         Assert.Equal(code, exception.ErrorCode);
+    }
+
+    /// <summary>Ignores metadata and unrelated properties on text parts.</summary>
+    [Fact]
+    public void GivenAdditionalPartFields_WhenFromA2A_PreservesText()
+    {
+        using var document = JsonDocument.Parse("""
+            {"parts":[{"text":"hello","metadata":{"key":1},"filename":"ignored.txt","kind":"text","unexpected":true}]}
+            """);
+
+        var result = TextTranslation.FromA2A(document.RootElement);
+
+        Assert.Equal("hello", result);
     }
 
     /// <summary>Preserves internal whitespace and Unicode while separating distinct text parts.</summary>

@@ -81,12 +81,12 @@ foreach (var name in copilot.Agents.Keys)
     app.MapA2AJsonRpc(name, AgentDiscovery.RuntimePath(name))
         .WithMetadata(new A2ARoute(name))
         .RequireAuthorization(DelegatedAuthentication.Policy);
-    app.MapGet(AgentDiscovery.CardPath(name), () => Results.Ok(AgentDiscovery.CreateCard(name, adapter, copilot.Agents[name]))).AllowAnonymous();
+    app.MapGet(AgentDiscovery.CardPath(name), (HttpContext http) => AgentDiscovery.GetCard(http, name, adapter, copilot.Agents[name])).AllowAnonymous();
 }
 if (copilot.Agents.Count == 1)
 {
     var name = copilot.Agents.Keys.Single();
-    app.MapGet("/.well-known/agent-card.json", () => Results.Ok(AgentDiscovery.CreateCard(name, adapter, copilot.Agents[name]))).AllowAnonymous();
+    app.MapGet("/.well-known/agent-card.json", (HttpContext http) => AgentDiscovery.GetCard(http, name, adapter, copilot.Agents[name])).AllowAnonymous();
 }
 
 // Unknown agent calls still authenticate and return a structured JSON-RPC error with HTTP 404.

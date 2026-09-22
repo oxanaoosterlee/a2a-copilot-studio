@@ -168,7 +168,9 @@ public sealed class AgentConfigurationIntegrationTests
         Assert.Equal($"https://localhost/copilot-studio/{name}/a2a", entry.GetProperty("endpoint").GetString());
         Assert.Equal($"https://localhost/copilot-studio/{name}/a2a/.well-known/agent-card.json", entry.GetProperty("agentCard").GetString());
 
-        using var cardResponse = await client.GetAsync($"/copilot-studio/{name}/a2a/.well-known/agent-card.json");
+        using var cardRequest = new HttpRequestMessage(HttpMethod.Get, $"/copilot-studio/{name}/a2a/.well-known/agent-card.json");
+        cardRequest.Headers.Add("A2A-Version", "1.0");
+        using var cardResponse = await client.SendAsync(cardRequest);
         Assert.Equal(HttpStatusCode.OK, cardResponse.StatusCode);
         var card = await TestRequests.ReadResponseAsync(cardResponse);
         Assert.Equal(name, card.GetProperty("name").GetString());
@@ -216,7 +218,7 @@ public sealed class AgentConfigurationIntegrationTests
             IsUnlistedAgentWarning(log, "CoolAgent") || IsUnlistedAgentWarning(log, "BackupAgent"));
     }
 
-    /// <summary>Evicts framework sessions using the original service key when capacity one switches agents.</summary>
+    /// <summary>Evicts framework sessions and restarts supplied contexts when capacity one switches agents.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
     public async Task GivenMixedCaseAgentsAtCapacityOne_WhenSwitchingAgents_CleansUpSessionsWithoutLowercaseKeyFailure()
@@ -235,8 +237,8 @@ public sealed class AgentConfigurationIntegrationTests
         var backupContext = backup.GetProperty("contextId").GetString()!;
         using var staleCool = await AdapterWebApplicationFactory.SendAsync(client, token,
             TestRequests.Create(contextId: firstContext).ToJsonString(), "/copilot-studio/CoolAgent/a2a");
-        await TestRequests.AssertErrorAsync(staleCool, A2AErrorCode.InvalidParams);
-        Assert.Equal(2, factory.Backend.Calls.Count);
+        var restartedCool = await TestRequests.AssertMessageAsync(staleCool, "CoolAgent: Hello");
+        Assert.Equal(firstContext, restartedCool.GetProperty("contextId").GetString());
 
         using var backupNextResponse = await AdapterWebApplicationFactory.SendAsync(client, token,
             TestRequests.Create("still retained", backupContext).ToJsonString(), "/copilot-studio/BackupAgent/a2a");
@@ -247,13 +249,16 @@ public sealed class AgentConfigurationIntegrationTests
         Assert.NotEqual(firstContext, newCool.GetProperty("contextId").GetString());
         using var staleBackup = await AdapterWebApplicationFactory.SendAsync(client, token,
             TestRequests.Create(contextId: backupContext).ToJsonString(), "/copilot-studio/BackupAgent/a2a");
-        await TestRequests.AssertErrorAsync(staleBackup, A2AErrorCode.InvalidParams);
+        var restartedBackup = await TestRequests.AssertMessageAsync(staleBackup, "BackupAgent: Hello");
+        Assert.Equal(backupContext, restartedBackup.GetProperty("contextId").GetString());
 
         Assert.Collection(factory.Backend.Calls,
             initial => { Assert.Equal("CoolAgent", initial.AgentName); Assert.Null(initial.ConversationId); },
             switched => { Assert.Equal("BackupAgent", switched.AgentName); Assert.Null(switched.ConversationId); },
-            retained => { Assert.Equal("BackupAgent", retained.AgentName); Assert.StartsWith("copilot-BackupAgent-", retained.ConversationId); },
-            restarted => { Assert.Equal("CoolAgent", restarted.AgentName); Assert.Null(restarted.ConversationId); });
+            restarted => { Assert.Equal("CoolAgent", restarted.AgentName); Assert.Null(restarted.ConversationId); },
+            restarted => { Assert.Equal("BackupAgent", restarted.AgentName); Assert.Null(restarted.ConversationId); },
+            restarted => { Assert.Equal("CoolAgent", restarted.AgentName); Assert.Null(restarted.ConversationId); },
+            restarted => { Assert.Equal("BackupAgent", restarted.AgentName); Assert.Null(restarted.ConversationId); });
         Assert.DoesNotContain(factory.Logs.Entries, log => log.Level >= LogLevel.Error);
     }
 }

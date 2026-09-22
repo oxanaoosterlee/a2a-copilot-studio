@@ -24,11 +24,9 @@ internal sealed class ConversationStore(AdapterOptions options)
         {
             evicted = null;
             key = (agentName.ToLowerInvariant(), contextId ?? Guid.NewGuid().ToString("N"));
-            isNew = contextId is null;
             if (!_conversations.TryGetValue(key, out conversation))
             {
-                if (!isNew)
-                    throw A2AProfile.Error(A2AErrorCode.InvalidParams, "Unknown contextId for this agent. State is lost after restart; omit contextId to start a new conversation.");
+                isNew = true;
                 if (_conversations.Count >= options.MaxConversations)
                 {
                     var candidate = _conversations.Where(entry => !entry.Value.Busy)
@@ -42,6 +40,10 @@ internal sealed class ConversationStore(AdapterOptions options)
                 }
                 conversation = new Conversation(key.Item2, agentName);
                 _conversations.Add(key, conversation);
+            }
+            else
+            {
+                isNew = false;
             }
             conversation.ActiveTurns++;
         }

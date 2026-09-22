@@ -4,7 +4,7 @@ using A2A;
 
 namespace CopilotStudioA2A.Tests;
 
-/// <summary>Specifies the supported JSON-RPC envelope and A2A 1.0 text request profile.</summary>
+/// <summary>Specifies the supported JSON-RPC envelope and A2A text request profiles.</summary>
 public sealed class A2AProfileTests
 {
     /// <summary>Rejects batches, notifications, invalid identifiers and malformed envelopes.</summary>
@@ -73,10 +73,9 @@ public sealed class A2AProfileTests
     }
 
     /// <summary>Requires an exact version header value rather than a compatible-looking value.</summary>
-    /// <param name="version">The supplied header value, empty when missing.</param>
+    /// <param name="version">The unsupported header value.</param>
     [Theory]
-    [InlineData("")]
-    [InlineData("0.3")]
+    [InlineData("0.3.0")]
     [InlineData("1")]
     [InlineData("1.0.0")]
     [InlineData("2.0")]
@@ -138,7 +137,7 @@ public sealed class A2AProfileTests
         Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
     }
 
-    /// <summary>Requires caller message IDs, user roles and nonempty context IDs when supplied.</summary>
+    /// <summary>Requires caller message IDs, user roles and string context IDs when supplied.</summary>
     /// <param name="field">The message property.</param>
     /// <param name="json">The replacement value, or null to omit the property.</param>
     [Theory]
@@ -153,8 +152,6 @@ public sealed class A2AProfileTests
     [InlineData("role", "\"user\"")]
     [InlineData("role", "\"ROLE_AGENT\"")]
     [InlineData("role", "\"role_user\"")]
-    [InlineData("contextId", "\"\"")]
-    [InlineData("contextId", "\"  \"")]
     [InlineData("contextId", "42")]
     public void GivenInvalidMessageField_WhenRead_RejectsParameters(string field, string? json)
     {
@@ -166,6 +163,23 @@ public sealed class A2AProfileTests
         var exception = Assert.Throws<A2AException>(() => TestRequests.Read(request));
 
         Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
+    }
+
+    /// <summary>Treats omitted, null or blank context IDs as requests for a generated context.</summary>
+    /// <param name="json">The context ID value, or null to omit the property.</param>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("null")]
+    [InlineData("\"\"")]
+    [InlineData("\"  \"")]
+    public void GivenNoUsableContextId_WhenRead_ReturnsNull(string? json)
+    {
+        var request = TestRequests.Create();
+        if (json is not null) request["params"]!["message"]!["contextId"] = JsonNode.Parse(json);
+
+        var result = TestRequests.Read(request);
+
+        Assert.Null(result.ContextId);
     }
 
     /// <summary>Bounds message and context identifiers without shortening accepted identifiers.</summary>
@@ -186,29 +200,40 @@ public sealed class A2AProfileTests
         Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
     }
 
-    /// <summary>Rejects unsupported metadata, task associations and unknown fields.</summary>
+    /// <summary>Ignores fields outside the adapter's required message data.</summary>
     /// <param name="location">The object containing the field.</param>
     /// <param name="field">The field to add.</param>
     /// <param name="json">Its nonempty value.</param>
-    /// <param name="code">The expected protocol error.</param>
     [Theory]
-    [InlineData("params", "metadata", "{\"key\":1}", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("params", "tenant", "\"tenant\"", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("params", "unexpected", "true", A2AErrorCode.InvalidParams)]
-    [InlineData("message", "taskId", "\"task-1\"", A2AErrorCode.TaskNotFound)]
-    [InlineData("message", "metadata", "{\"key\":1}", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("message", "extensions", "[\"extension\"]", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("message", "referenceTaskIds", "[\"task-1\"]", A2AErrorCode.UnsupportedOperation)]
-    [InlineData("message", "kind", "\"message\"", A2AErrorCode.InvalidParams)]
-    public void GivenUnsupportedField_WhenRead_ReturnsSpecificError(string location, string field, string json, A2AErrorCode code)
+    [InlineData("params", "metadata", "{\"key\":1}")]
+    [InlineData("params", "tenant", "\"tenant\"")]
+    [InlineData("params", "unexpected", "true")]
+    [InlineData("message", "metadata", "{\"key\":1}")]
+    [InlineData("message", "extensions", "[\"extension\"]")]
+    [InlineData("message", "referenceTaskIds", "[\"task-1\"]")]
+    [InlineData("message", "kind", "\"message\"")]
+    public void GivenAdditionalField_WhenRead_PreservesSupportedData(string location, string field, string json)
     {
         var request = TestRequests.Create();
         var parent = location == "params" ? request["params"]! : request["params"]!["message"]!;
         parent[field] = JsonNode.Parse(json);
 
+        var result = TestRequests.Read(request);
+
+        Assert.Equal("caller-message-1", result.MessageId);
+        Assert.Equal("Hello", result.Text);
+    }
+
+    /// <summary>Continues to reject task associations because they change request semantics.</summary>
+    [Fact]
+    public void GivenTaskAssociation_WhenRead_ReturnsTaskNotFound()
+    {
+        var request = TestRequests.Create();
+        request["params"]!["message"]!["taskId"] = "task-1";
+
         var exception = Assert.Throws<A2AException>(() => TestRequests.Read(request));
 
-        Assert.Equal(code, exception.ErrorCode);
+        Assert.Equal(A2AErrorCode.TaskNotFound, exception.ErrorCode);
     }
 
     /// <summary>Permits absent semantics expressed as null or empty optional fields.</summary>
@@ -239,7 +264,6 @@ public sealed class A2AProfileTests
     [Theory]
     [InlineData("[]", A2AErrorCode.InvalidParams)]
     [InlineData("42", A2AErrorCode.InvalidParams)]
-    [InlineData("{\"unexpected\":true}", A2AErrorCode.InvalidParams)]
     [InlineData("{\"returnImmediately\":\"false\"}", A2AErrorCode.InvalidParams)]
     [InlineData("{\"returnImmediately\":0}", A2AErrorCode.InvalidParams)]
     [InlineData("{\"taskPushNotificationConfig\":{}}", A2AErrorCode.PushNotificationNotSupported)]

@@ -41,36 +41,32 @@ public sealed class ConversationStoreTests
         Assert.True(continuation.Conversation.Busy);
     }
 
-    /// <summary>Does not accept arbitrary caller contexts as new conversations.</summary>
-    /// <param name="context">An unknown caller context.</param>
+    /// <summary>Accepts and preserves caller contexts for new conversations.</summary>
+    /// <param name="context">A caller-supplied context.</param>
     /// <returns>The asynchronous test operation.</returns>
     [Theory]
-    [InlineData("")]
     [InlineData("unknown")]
     [InlineData("00000000000000000000000000000000")]
-    public async Task GivenUnknownContext_WhenOpen_RejectsWithoutCreatingState(string context)
+    public async Task GivenNewCallerContext_WhenOpen_CreatesConversationWithSuppliedId(string context)
     {
-        var exception = await Assert.ThrowsAsync<A2AException>(
-            () => _sut.OpenAsync("support", context).AsTask());
+        using var conversation = await _sut.OpenAsync("support", context);
 
-        Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
-        using var fresh = await _sut.OpenAsync("support", null);
-        Assert.NotEqual(context, fresh.Conversation.ContextId);
+        Assert.Equal(context, conversation.Conversation.ContextId);
+        Assert.Null(conversation.Conversation.CopilotConversationId);
     }
 
-    /// <summary>Never shares contexts across agents, even if a valid context ID is supplied.</summary>
+    /// <summary>Uses the same caller context as an independent new conversation on another agent.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
-    public async Task GivenOtherAgentsContext_WhenOpen_RejectsCrossAgentContinuation()
+    public async Task GivenOtherAgentsContext_WhenOpen_CreatesIndependentConversation()
     {
         using var support = await _sut.OpenAsync("support", null);
 
-        var exception = await Assert.ThrowsAsync<A2AException>(
-            () => _sut.OpenAsync("billing", support.Conversation.ContextId).AsTask());
+        using var billing = await _sut.OpenAsync("billing", support.Conversation.ContextId);
 
-        Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
-        using var billing = await _sut.OpenAsync("billing", null);
-        Assert.NotEqual(support.Conversation.ContextId, billing.Conversation.ContextId);
+        Assert.NotSame(support.Conversation, billing.Conversation);
+        Assert.Equal(support.Conversation.ContextId, billing.Conversation.ContextId);
+        Assert.Null(billing.Conversation.CopilotConversationId);
     }
 
     /// <summary>Queues an overlapping turn until the current turn releases the context.</summary>
@@ -117,23 +113,21 @@ public sealed class ConversationStoreTests
         }
     }
 
-    /// <summary>Removes an unsuccessful new context and frees its capacity.</summary>
+    /// <summary>Removes an unsuccessful caller context and allows a clean retry.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
     public async Task GivenFailedFirstTurn_WhenDisposed_RemovesContextAndAllowsReplacement()
     {
         var store = new ConversationStore(new AdapterOptions { MaxConversations = 1 });
-        var failed = await store.OpenAsync("support", null);
+        var failed = await store.OpenAsync("support", "caller-context");
         var contextId = failed.Conversation.ContextId;
         failed.Conversation.CopilotConversationId = "partially-created-downstream-state";
 
         failed.Dispose();
 
-        var exception = await Assert.ThrowsAsync<A2AException>(
-            () => store.OpenAsync("support", contextId).AsTask());
-        Assert.Equal(A2AErrorCode.InvalidParams, exception.ErrorCode);
-        using var replacement = await store.OpenAsync("support", null);
-        Assert.NotEqual(contextId, replacement.Conversation.ContextId);
+        using var replacement = await store.OpenAsync("support", contextId);
+        Assert.NotSame(failed.Conversation, replacement.Conversation);
+        Assert.Equal(contextId, replacement.Conversation.ContextId);
         Assert.Null(replacement.Conversation.CopilotConversationId);
     }
 
@@ -197,10 +191,10 @@ public sealed class ConversationStoreTests
         Assert.Same(support.Conversation, continuation.Conversation);
     }
 
-    /// <summary>Reclaims the least recently used idle context instead of imposing a lifetime limit.</summary>
+    /// <summary>Reclaims the least recently used idle context and permits that ID to start fresh.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
-    public async Task GivenFullIdleCapacity_WhenOpen_EvictsOldestAndRejectsItsContinuation()
+    public async Task GivenFullIdleCapacity_WhenOpen_EvictsOldestAndRestartsItsContext()
     {
         var store = new ConversationStore(new AdapterOptions { MaxConversations = 2 });
         var oldest = await store.OpenAsync("support", null);
@@ -210,14 +204,15 @@ public sealed class ConversationStoreTests
         recent.Succeeded = true;
         recent.Dispose();
 
-        using var replacement = await store.OpenAsync("support", null);
+        var replacement = await store.OpenAsync("support", null);
 
         Assert.Equal(("support", oldest.Conversation.ContextId), replacement.Evicted);
-        var error = await Assert.ThrowsAsync<A2AException>(
-            () => store.OpenAsync("support", oldest.Conversation.ContextId).AsTask());
-        Assert.Equal(A2AErrorCode.InvalidParams, error.ErrorCode);
-        using var retained = await store.OpenAsync("billing", recent.Conversation.ContextId);
-        Assert.Same(recent.Conversation, retained.Conversation);
+        replacement.Succeeded = true;
+        replacement.Dispose();
+        using var restarted = await store.OpenAsync("support", oldest.Conversation.ContextId);
+        Assert.NotSame(oldest.Conversation, restarted.Conversation);
+        Assert.Equal(oldest.Conversation.ContextId, restarted.Conversation.ContextId);
+        Assert.Null(restarted.Conversation.CopilotConversationId);
     }
 
     /// <summary>Preserves the configured service key even after reopening a context with different casing.</summary>
@@ -241,13 +236,16 @@ public sealed class ConversationStoreTests
             continuation.Succeeded = true;
         }
 
-        using var replacement = await store.OpenAsync(nextName, null);
+        var replacement = await store.OpenAsync(nextName, null);
 
         Assert.Equal(originalName, conversation.AgentName);
         Assert.Equal((originalName, conversation.ContextId), replacement.Evicted);
         Assert.Equal(nextName, replacement.Conversation.AgentName);
-        var error = await Assert.ThrowsAsync<A2AException>(
-            () => store.OpenAsync(originalName, conversation.ContextId).AsTask());
-        Assert.Equal(A2AErrorCode.InvalidParams, error.ErrorCode);
+        replacement.Succeeded = true;
+        replacement.Dispose();
+        using var restarted = await store.OpenAsync(originalName, conversation.ContextId);
+        Assert.NotSame(conversation, restarted.Conversation);
+        Assert.Equal(originalName, restarted.Conversation.AgentName);
+        Assert.Null(restarted.Conversation.CopilotConversationId);
     }
 }

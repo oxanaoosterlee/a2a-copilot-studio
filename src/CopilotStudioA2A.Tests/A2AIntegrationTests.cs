@@ -115,22 +115,24 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
         Assert.Empty(Factory.Backend.Calls);
     }
 
-    /// <summary>Does not silently restart an unknown context.</summary>
+    /// <summary>Accepts and preserves a caller-supplied context on its first request.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
-    public async Task GivenUnknownContext_WhenSendingMessage_RejectsBeforeBackend()
+    public async Task GivenCallerContextOnFirstRequest_WhenSendingMessage_PreservesContext()
     {
+        const string contextId = "caller-selected-context";
         using var response = await AdapterWebApplicationFactory.SendAsync(Client, Factory.CreateToken(),
-            TestRequests.Create(contextId: "not-a-server-context").ToJsonString());
+            TestRequests.Create(contextId: contextId).ToJsonString());
 
-        await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidParams);
-        Assert.Empty(Factory.Backend.Calls);
+        var message = await TestRequests.AssertMessageAsync(response, "support: Hello");
+        Assert.Equal(contextId, message.GetProperty("contextId").GetString());
+        Assert.Null(Assert.Single(Factory.Backend.Calls).ConversationId);
     }
 
-    /// <summary>Rejects a valid context on another agent without a second downstream send.</summary>
+    /// <summary>Uses a caller context as an independent first conversation on another agent.</summary>
     /// <returns>The asynchronous test operation.</returns>
     [Fact]
-    public async Task GivenCrossAgentContext_WhenSendingMessage_RejectsBeforeBackend()
+    public async Task GivenCrossAgentContext_WhenSendingMessage_StartsIndependentConversation()
     {
         var token = Factory.CreateToken();
         using var firstResponse = await AdapterWebApplicationFactory.SendAsync(Client, token);
@@ -139,23 +141,27 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
         using var response = await AdapterWebApplicationFactory.SendAsync(Client, token,
             TestRequests.Create(contextId: first.GetProperty("contextId").GetString()).ToJsonString(), "/copilot-studio/billing/a2a");
 
-        await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidParams);
-        Assert.Single(Factory.Backend.Calls);
+        var billing = await TestRequests.AssertMessageAsync(response, "billing: Hello");
+        Assert.Equal(first.GetProperty("contextId").GetString(), billing.GetProperty("contextId").GetString());
+        Assert.Equal(2, Factory.Backend.Calls.Count);
+        Assert.Null(Factory.Backend.Calls[1].ConversationId);
     }
 
-    /// <summary>Rejects missing and unsupported mandatory A2A version headers.</summary>
-    /// <param name="version">The version value, or null to omit the header.</param>
+    /// <summary>Rejects unsupported version headers without selecting a response version.</summary>
+    /// <param name="version">The unsupported version value.</param>
     /// <returns>The asynchronous test operation.</returns>
     [Theory]
-    [InlineData(null)]
-    [InlineData("0.3")]
+    [InlineData("0.3.0")]
     [InlineData("1.0.0")]
     [InlineData("2.0")]
+    [InlineData("0.3,1.0")]
     public async Task GivenInvalidVersion_WhenSendingMessage_RejectsBeforeBackend(string? version)
     {
         using var response = await AdapterWebApplicationFactory.SendAsync(Client, Factory.CreateToken(), version: version);
 
-        await TestRequests.AssertErrorAsync(response, A2AErrorCode.VersionNotSupported);
+        var error = await TestRequests.AssertErrorAsync(response, A2AErrorCode.VersionNotSupported, version: null);
+        Assert.Equal(new[] { "0.3", "1.0" }, error.GetProperty("error").GetProperty("data")
+            .GetProperty("supportedVersions").EnumerateArray().Select(value => value.GetString()).ToArray());
         Assert.Empty(Factory.Backend.Calls);
     }
 
@@ -264,17 +270,21 @@ public sealed class A2AIntegrationTests : AdapterIntegrationTestsBase
     }
 
     /// <summary>Rejects bodies exceeding the configured transport limit without invoking Copilot.</summary>
+    /// <param name="version">The request protocol version.</param>
     /// <returns>The asynchronous test operation.</returns>
-    [Fact]
-    public async Task GivenOversizedBody_WhenSendingMessage_Returns413()
+    [Theory]
+    [InlineData("0.3")]
+    [InlineData("1.0")]
+    public async Task GivenOversizedBody_WhenSendingMessage_Returns413(string version)
     {
         using var factory = new AdapterWebApplicationFactory(includeBilling: true, maxRequestBytes: 1024);
         using var client = factory.CreateLocalClient();
+        var request = version == "0.3" ? TestRequests.CreateLegacy(new string('x', 2048)) : TestRequests.Create(new string('x', 2048));
 
         using var response = await AdapterWebApplicationFactory.SendAsync(client, factory.CreateToken(),
-            TestRequests.Create(new string('x', 2048)).ToJsonString());
+            request.ToJsonString(), version: version);
 
-        await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidRequest, HttpStatusCode.RequestEntityTooLarge, id: null);
+        await TestRequests.AssertErrorAsync(response, A2AErrorCode.InvalidRequest, HttpStatusCode.RequestEntityTooLarge, id: null, version: version);
         Assert.Empty(factory.Backend.Calls);
     }
 
